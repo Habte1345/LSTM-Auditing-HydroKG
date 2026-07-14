@@ -1,4 +1,5 @@
 from hydrokg.adapters.lstm_adapter import (
+    create_h5_dataset,
     get_basin_list,
     load_camels_attributes,
     load_discharge_for_basin,
@@ -9,6 +10,7 @@ from hydrokg.adapters.lstm_adapter import (
 )
 
 __all__ = [
+    "create_h5_dataset",
     "get_basin_list",
     "load_camels_attributes",
     "load_discharge_for_basin",

@@ -15,25 +15,31 @@ output (after the forward pass, as an explicit post-processing step). This is th
 deliberate distinction from physics-informed-loss approaches per the project's design
 decision.
 
-Mechanism 2 implementation note: earlier drafts of this module attempted to concatenate
-the 7-dim violation embedding directly onto the dynamic input tensor inside the training
-loop. That doesn't work correctly without per-sample basin attribution, which the
-submodule's CamelsH5 *does* track internally (`sample_2_basin`) but doesn't expose in a
-form convenient for that approach. The fix used here instead: write the embedding as
-ordinary extra columns into a COPY of the run's attributes.db
-(violation_embeddings.write_embeddings_to_attributes_db) and point CamelsH5's `db_path` at
-that copy. CamelsH5 already reads static attributes per-basin from `db_path` and
-z-score-normalizes and concatenates them automatically (`data/datasets.py::CamelsH5`) --
-so the embedding is included with zero submodule changes, and `input_size_dyn` is computed
-from the actual resulting column count rather than a hardcoded assumption.
+Mechanism 2 implementation note: the 7-dim violation embedding is written as ordinary
+extra columns into a COPY of the run's attributes.db
+(violation_embeddings.write_embeddings_to_attributes_db), not concatenated directly onto
+the dynamic input tensor. CamelsH5 already reads static attributes per-basin from
+`db_path` and z-score-normalizes/concatenates them automatically
+(data/datasets.py::CamelsH5) -- so the embedding is included with zero submodule changes,
+and `input_size_dyn` is computed from the actual resulting column count.
 
-This module has NOT been executed end-to-end against a real CAMELS run in the sandbox
-this was developed in (no CAMELS data, no PyTorch/CUDA environment available there). The
-per-mechanism logic (curriculum weighting, analogy correction, embeddings, the db-copy
-injection) IS independently tested against synthetic data / a synthetic sqlite db in
-tests/test_enhancement.py; this module is the integration point wiring them into the
-submodule's own Model/CamelsH5/evaluate_basin logic, reviewed for correctness but not run.
-Validate against your real run before trusting its numbers.
+train_data.h5 note: this is a large preprocessing artifact the submodule's own training
+run builds once and is correctly gitignored -- it will NOT exist in a fresh submodule
+clone even though a run's cfg.json/model weights do. fine_tune() rebuilds it on demand
+under this pipeline's work_dir (never inside the submodule's own run_dir) if missing.
+
+Pretrained-weight loading note: PyTorch's `load_state_dict(strict=False)` only skips
+missing/unexpected KEYS -- it still raises on a key present in both state dicts whose
+SHAPE differs, which is exactly what happens to `lstm.weight_ih` (the only parameter
+whose shape depends on input_size_dyn; verified against Scripts/lstm.py -- weight_hh,
+bias, and fc.weight/bias are all independent of it). This module filters the checkpoint
+by shape before loading, so everything except weight_ih warm-starts correctly.
+
+Status: reviewed for correctness against the submodule's actual code, and the shape-
+filtered checkpoint loading has been unit-tested against a real PyTorch model matching
+the submodule's parameter names/shapes. The full pipeline has NOT yet completed an
+end-to-end run against real CAMELS data in the environment this was developed in (no
+CAMELS data available there) -- expect to iterate on this against your real run.
 """
 
 from __future__ import annotations
@@ -45,6 +51,7 @@ from typing import Optional
 
 import numpy as np
 import pandas as pd
+from tqdm import tqdm
 
 from hydrokg.adapters.lstm_adapter import _ensure_submodule_on_path, load_run_config
 from hydrokg.enhancement.curriculum import ViolationCurriculumSampler
@@ -71,9 +78,9 @@ class EnhancedTrainingPipeline:
             the traditional predictions first. That baseline graph state is exactly what
             seeds curriculum reweighting and the violation embedding for this fine-tuning
             pass.
-        work_dir : where to write the attributes.db copy and enhanced outputs. Defaults to
-            `<run_dir>/hydrokg_enhanced/` so nothing is written inside the submodule's own
-            (untouched) run directory tree.
+        work_dir : where to write the attributes.db copy, train_data.h5 (if missing), and
+            enhanced outputs. Defaults to `<run_dir>/hydrokg_enhanced/` so nothing is
+            written inside the submodule's own (untouched) run directory tree.
         """
         self.graph = graph_store
         self.run_dir = Path(run_dir)
@@ -90,6 +97,37 @@ class EnhancedTrainingPipeline:
         target_db = self.work_dir / "attributes_with_violation_embedding.db"
         return write_embeddings_to_attributes_db(source_db, target_db, self.graph, basin_ids)
 
+    def _ensure_train_h5(self, basin_ids: list[str]) -> Path:
+        """Rebuild train_data.h5 under work_dir if it isn't already sitting in the run's
+        own data/train (e.g. because it was correctly gitignored and never pushed)."""
+        original_h5 = self.run_dir / "data" / "train" / "train_data.h5"
+        if original_h5.exists():
+            return original_h5
+
+        rebuilt_h5 = self.work_dir / "train_data.h5"
+        if rebuilt_h5.exists():
+            return rebuilt_h5
+
+        from hydrokg.adapters.lstm_adapter import create_h5_dataset
+
+        train_start = pd.to_datetime(self.run_cfg["train_start"], format="%d%m%Y")
+        train_end = pd.to_datetime(self.run_cfg["train_end"], format="%d%m%Y")
+        tqdm.write(
+            f"[fine_tune] train_data.h5 not found at {original_h5} (gitignored preprocessing "
+            f"artifact, not part of the submodule's git history) -- rebuilding it once from "
+            f"CAMELS forcing/discharge under {rebuilt_h5}. This re-reads raw text files for "
+            f"{len(basin_ids)} basins and only needs to happen once."
+        )
+        create_h5_dataset(
+            camels_root=self.camels_root,
+            out_file=rebuilt_h5,
+            basins=basin_ids,
+            train_start=train_start,
+            train_end=train_end,
+            seq_length=self.run_cfg["seq_length"],
+        )
+        return rebuilt_h5
+
     def fine_tune(
         self,
         basin_ids: list[str],
@@ -105,9 +143,8 @@ class EnhancedTrainingPipeline:
             attributes.db copy -- see module docstring),
           - the submodule's own unmodified NSELoss.
 
-        Only meaningful when the run used `concat_static=True` (the embedding rides in as
-        static attributes); if the run used `no_static=True`, this raises, since there is
-        no static-attribute channel to inject the embedding into.
+        Only meaningful when the run used `concat_static=True`; raises otherwise (see
+        message below).
 
         Returns (state_dict, augmented_db_path) -- pass augmented_db_path to
         generate_predictions() so evaluation uses the same static-attribute set training did.
@@ -116,9 +153,8 @@ class EnhancedTrainingPipeline:
             raise ValueError(
                 "This run was trained with no_static=True: there is no static-attribute "
                 "channel to inject the violation-history embedding into. Re-train with "
-                "concat_static=True if you want to use this enhancement mechanism, or use "
-                "only the curriculum-reweighting and graph-analogy-correction mechanisms "
-                "(which don't require it) for a no_static run."
+                "concat_static=True to use this mechanism, or use only curriculum "
+                "reweighting and graph-analogy correction (which don't require it)."
             )
 
         _ensure_submodule_on_path()
@@ -130,11 +166,12 @@ class EnhancedTrainingPipeline:
         from Scripts.nseloss import NSELoss  # noqa: E402
 
         device_t = torch.device(device)
+        tqdm.write("[fine_tune] Step A: preparing embedding-augmented attributes.db")
         augmented_db = self._augmented_db_path(basin_ids)
 
-        # Real static-feature count (original CAMELS attrs minus INVALID_ATTR, plus the
-        # 7 new violation_rate_* columns) -- NOT a hardcoded 32, which was wrong for any
-        # run whose static feature count differs and silently wrong once we add 7 more.
+        tqdm.write("[fine_tune] Step B: locating/rebuilding train_data.h5")
+        train_h5 = self._ensure_train_h5(basin_ids)
+
         n_static = n_static_features(augmented_db, basin_ids)
         input_size_dyn = 5 + n_static
 
@@ -147,35 +184,27 @@ class EnhancedTrainingPipeline:
             no_static=False,
         ).to(device_t)
 
+        tqdm.write("[fine_tune] Step C: warm-starting from pretrained checkpoint")
         weight_file = self.run_dir / "model_epoch5.pt"
         checkpoint_state = torch.load(weight_file, map_location=device_t)
         model_state = model.state_dict()
 
-        # strict=False in PyTorch only skips MISSING/UNEXPECTED keys -- it still raises on
-        # keys present in both state dicts whose shapes differ, which is exactly what
-        # happens to lstm.weight_ih (the only parameter whose shape depends on
-        # input_size_dyn; weight_hh, bias, and fc.weight/bias are all independent of it --
-        # verified against Scripts/lstm.py). So shape-matched keys are warm-started from
-        # the checkpoint and the one shape-mismatched key is left at its random init,
-        # rather than either crashing (plain strict=False) or discarding the whole
-        # checkpoint.
+        # strict=False only skips MISSING/UNEXPECTED keys, not shape-mismatched ones
+        # present in both dicts -- filter by shape explicitly. lstm.weight_ih is the only
+        # parameter whose shape depends on input_size_dyn (verified against Scripts/lstm.py).
         compatible = {k: v for k, v in checkpoint_state.items()
                       if k in model_state and model_state[k].shape == v.shape}
         skipped = sorted(set(checkpoint_state.keys()) - set(compatible.keys()))
         model_state.update(compatible)
         model.load_state_dict(model_state)
-        if skipped:
-            logger.warning(
-                "Warm-started %d/%d pretrained parameters; %s left at random init due to "
-                "the input-size change from the violation embedding (expected: only the "
-                "input-facing LSTM weight should differ).",
-                len(compatible), len(checkpoint_state), skipped,
-            )
-        else:
-            logger.info("Loaded all %d pretrained parameters with matching shapes.", len(compatible))
+        tqdm.write(
+            f"[fine_tune]   warm-started {len(compatible)}/{len(checkpoint_state)} parameters; "
+            f"random-init: {skipped or 'none'}"
+        )
 
+        tqdm.write("[fine_tune] Step D: loading training data + curriculum weights")
         ds = CamelsH5(
-            h5_file=self.run_dir / "data" / "train" / "train_data.h5",
+            h5_file=train_h5,
             basins=basin_ids,
             db_path=str(augmented_db),
             concat_static=True,
@@ -183,9 +212,6 @@ class EnhancedTrainingPipeline:
             no_static=False,
         )
 
-        # Real per-sample basin ids, straight from the submodule's own cached attribute
-        # (ds.sample_2_basin, populated by CamelsH5._preload_data when cache=True) --
-        # not a guessed/nonexistent attribute name.
         sampler_helper = self.build_curriculum_sampler()
         basin_weights = sampler_helper.basin_weights(basin_ids)
         per_sample_weights = np.array([basin_weights.get(b, sampler_helper.floor_weight)
@@ -196,11 +222,12 @@ class EnhancedTrainingPipeline:
         optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
         loss_func = NSELoss()
 
+        tqdm.write(f"[fine_tune] Step E: training for {n_epochs} epoch(s)")
         model.train()
         for epoch in range(1, n_epochs + 1):
-            epoch_loss = 0.0
-            n_batches = 0
-            for data in loader:
+            running_loss = 0.0
+            pbar = tqdm(loader, desc=f"epoch {epoch}/{n_epochs}", unit="batch", leave=False)
+            for i, data in enumerate(pbar, start=1):
                 optimizer.zero_grad()
                 x, y, q_stds = data
                 x, y, q_stds = x.to(device_t), y.to(device_t), q_stds.to(device_t)
@@ -208,10 +235,9 @@ class EnhancedTrainingPipeline:
                 loss = loss_func(predictions, y, q_stds)
                 loss.backward()
                 optimizer.step()
-                epoch_loss += loss.item()
-                n_batches += 1
-            logger.info("Enhanced fine-tuning epoch %d/%d complete, mean loss=%.4f",
-                        epoch, n_epochs, epoch_loss / max(n_batches, 1))
+                running_loss += loss.item()
+                pbar.set_postfix(mean_loss=f"{running_loss / i:.4f}")
+            tqdm.write(f"[fine_tune]   epoch {epoch}/{n_epochs} done, mean loss={running_loss / max(i, 1):.4f}")
 
         state_dict_path = self.work_dir / "enhanced_model_state_dict.pt"
         torch.save(model.state_dict(), state_dict_path)
@@ -229,8 +255,7 @@ class EnhancedTrainingPipeline:
         evaluate() uses (GLOBAL_SETTINGS val_start/val_end), mirroring its evaluate_basin()
         logic exactly, but against the fine-tuned weights and the embedding-augmented
         attributes.db. Returns {basin_id: DataFrame(qobs, qsim)}, the same shape/format
-        as the submodule's own predictions pickle, so it can be audited by
-        OfflineAuditor.audit_all() and saved with save_predictions_pickle() below.
+        as the submodule's own predictions pickle.
         """
         _ensure_submodule_on_path()
         import torch
@@ -254,22 +279,18 @@ class EnhancedTrainingPipeline:
         model.load_state_dict(state_dict)
         model.eval()
 
-        # attribute means/stds must come from the SAME (augmented) training data the
-        # fine-tuned model actually saw, exactly as the submodule's own evaluate() derives
-        # them from ds_train before evaluating on the validation period.
+        train_h5 = self._ensure_train_h5(basin_ids)
         ds_train = CamelsH5(
-            h5_file=self.run_dir / "data" / "train" / "train_data.h5",
-            db_path=str(augmented_db_path),
-            basins=basin_ids,
-            concat_static=True,
+            h5_file=train_h5, db_path=str(augmented_db_path), basins=basin_ids, concat_static=True,
         )
         means = ds_train.get_attribute_means()
         stds = ds_train.get_attribute_stds()
 
         date_range = pd.date_range(start=GLOBAL_SETTINGS["val_start"], end=GLOBAL_SETTINGS["val_end"])
         results: dict[str, pd.DataFrame] = {}
+        skipped_basins = []
 
-        for basin in basin_ids:
+        for basin in tqdm(basin_ids, desc="generating predictions", unit="basin"):
             try:
                 ds_test = CamelsTXT(
                     camels_root=self.camels_root,
@@ -284,14 +305,14 @@ class EnhancedTrainingPipeline:
                     db_path=str(augmented_db_path),
                 )
             except Exception as exc:  # noqa: BLE001
-                logger.warning("Skipping basin %s (could not build eval dataset: %s)", basin, exc)
+                skipped_basins.append((basin, str(exc)))
                 continue
 
             loader = DataLoader(ds_test, batch_size=1024, shuffle=False, num_workers=0)
             preds, obs = None, None
             with torch.no_grad():
                 for data in loader:
-                    x, y = data[0], data[1] if len(data) == 2 else data[1]
+                    x, y = data[0], data[1]
                     x = x.to(device_t)
                     p = model(x)[0]
                     preds = p.detach().cpu() if preds is None else torch.cat((preds, p.detach().cpu()), 0)
@@ -304,6 +325,8 @@ class EnhancedTrainingPipeline:
                 {"qobs": obs_np[:n], "qsim": preds_np[:n]}, index=date_range[:n]
             )
 
+        if skipped_basins:
+            tqdm.write(f"[generate_predictions] skipped {len(skipped_basins)} basin(s), e.g.: {skipped_basins[:3]}")
         return results
 
     def apply_analogy_correction(
@@ -315,10 +338,9 @@ class EnhancedTrainingPipeline:
         """
         Post-processing pass: for every (basin, timestamp) where a daily rule (R0-R3) was
         flagged in `raw_predictions`, replace the raw q_sim with the graph-analogy-corrected
-        value. Get `violation_by_basin` by running OfflineAuditor.audit_all() against
-        `raw_predictions` first (a SEPARATE graph/auditor instance from the one used to
-        seed curriculum reweighting, so this reflects violations remaining AFTER
-        fine-tuning, not the baseline's).
+        value. Get `violation_by_basin` by running the rules against `raw_predictions` first
+        (a SEPARATE graph/auditor instance from the one used to seed curriculum reweighting,
+        so this reflects violations remaining AFTER fine-tuning, not the baseline's).
 
         Parameters
         ----------
@@ -327,7 +349,11 @@ class EnhancedTrainingPipeline:
         corrector = GraphAnalogyCorrector(self.graph, raw_predictions)
         corrected = {b: df.copy() for b, df in raw_predictions.items()}
 
-        for basin_id, flagged in violation_by_basin.items():
+        n_flagged = sum(len(v) for v in violation_by_basin.values())
+        pbar = tqdm(violation_by_basin.items(), desc="graph-analogy correction", unit="basin",
+                    total=len(violation_by_basin))
+        n_corrected = 0
+        for basin_id, flagged in pbar:
             if basin_id not in corrected:
                 continue
             aridity_class = stratification.loc[basin_id].get("aridity_class") if basin_id in stratification.index else None
@@ -343,6 +369,8 @@ class EnhancedTrainingPipeline:
                     basin_id, ts, raw_val, rule_id, aridity_class, landcover_class
                 )
                 corrected[basin_id].loc[ts, "qsim"] = new_val
+                n_corrected += 1
+            pbar.set_postfix(corrected=n_corrected, of=n_flagged)
 
         return corrected
 
@@ -352,5 +380,5 @@ class EnhancedTrainingPipeline:
         out_path = self.work_dir / filename
         with open(out_path, "wb") as fp:
             pickle.dump(predictions, fp)
-        logger.info("Saved enhanced predictions to %s", out_path)
+        tqdm.write(f"[save_predictions_pickle] saved enhanced predictions to {out_path}")
         return out_path

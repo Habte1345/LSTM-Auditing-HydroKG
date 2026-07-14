@@ -64,7 +64,10 @@ class InMemoryGraphStore(GraphStore):
         if not rows:
             return 0
         new_df = pd.DataFrame(rows)
-        self._violations = pd.concat([self._violations, new_df], ignore_index=True)
+        if self._violations.empty:
+            self._violations = new_df
+        else:
+            self._violations = pd.concat([self._violations, new_df], ignore_index=True)
         return len(rows)
 
     def set_basin_metrics(self, basin_id: str, kge: Optional[float] = None,

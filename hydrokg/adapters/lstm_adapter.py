@@ -84,6 +84,38 @@ def get_basin_list() -> list[str]:
     return get_basin_list()
 
 
+def create_h5_dataset(
+    camels_root: str | Path,
+    out_file: str | Path,
+    basins: list[str],
+    train_start,
+    train_end,
+    seq_length: int,
+) -> Path:
+    """Delegates to the submodule's Scripts.utils.create_h5_files, unmodified.
+
+    train_data.h5 is a large preprocessing artifact the submodule's own training run
+    builds once (via its _prepare_data) and is correctly gitignored -- it will NOT exist
+    in a fresh submodule clone even though a run's cfg.json/model weights do. This
+    rebuilds it on demand (raises FileExistsError if it's already there, matching the
+    submodule's own behavior, so it's safe to call unconditionally).
+    """
+    _ensure_submodule_on_path()
+    from Scripts.utils import create_h5_files  # noqa: E402
+
+    out_file = Path(out_file)
+    out_file.parent.mkdir(parents=True, exist_ok=True)
+    create_h5_files(
+        camels_root=Path(camels_root),
+        out_file=out_file,
+        basins=basins,
+        dates=[pd.Timestamp(train_start), pd.Timestamp(train_end)],
+        with_basin_str=True,
+        seq_length=seq_length,
+    )
+    return out_file
+
+
 def run_submodule_cli(mode: str, extra_args: Optional[list[str]] = None) -> subprocess.CompletedProcess:
     """Invoke the submodule's src/main.py as a subprocess (train/evaluate/create_splits),
     exactly as its own README/command.sh does, but with args supplied by the caller instead
