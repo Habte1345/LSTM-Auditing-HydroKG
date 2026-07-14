@@ -1,7 +1,12 @@
 from hydrokg.enhancement.curriculum import ViolationCurriculumSampler
 from hydrokg.enhancement.enhanced_training import EnhancedTrainingPipeline
 from hydrokg.enhancement.graph_analogy_correction import GraphAnalogyCorrector
-from hydrokg.enhancement.violation_embeddings import basin_violation_embedding, build_embedding_matrix
+from hydrokg.enhancement.violation_embeddings import (
+    basin_violation_embedding,
+    build_embedding_matrix,
+    n_static_features,
+    write_embeddings_to_attributes_db,
+)
 
 __all__ = [
     "ViolationCurriculumSampler",
@@ -9,4 +14,6 @@ __all__ = [
     "GraphAnalogyCorrector",
     "basin_violation_embedding",
     "build_embedding_matrix",
+    "n_static_features",
+    "write_embeddings_to_attributes_db",
 ]
