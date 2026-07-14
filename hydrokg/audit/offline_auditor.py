@@ -58,7 +58,8 @@ class OfflineAuditor:
         valid = df[["qobs", "qsim"]].dropna()
         kge = calc_kge(valid["qobs"].values, valid["qsim"].values) if not valid.empty else float("nan")
         burden = compute_violation_burden(violation_counts, n_evaluable)
-        dom_class = dominant_violation_class(violation_counts)
+        # dom_class = dominant_violation_class(violation_counts)
+        dom_class = dominant_violation_class(violation_counts, n_evaluable)
 
         self.graph.set_basin_metrics(basin_id, kge=kge, violation_burden=burden)
 

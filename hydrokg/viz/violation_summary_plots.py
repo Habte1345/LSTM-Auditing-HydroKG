@@ -20,14 +20,14 @@ def plot_rule_violation_counts(violation_counts_by_basin: dict[str, dict[str, in
     if ax is None:
         fig, ax = plt.subplots(figsize=(6, 4), dpi=150)
 
-    labels = [f"{rid}\n{RULE_METADATA[rid]['name']}" for rid in RULE_IDS]
+    labels = [f"{RULE_METADATA[rid]['name']}" for rid in RULE_IDS]
     values = [totals[rid] for rid in RULE_IDS]
     ax.bar(labels, values, color="#345995", width=0.6)
     ax.set_ylabel("Total violations")
     ax.set_title("Violation counts by rule")
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
-    ax.tick_params(axis="x", labelsize=8)
+    ax.tick_params(axis="x", labelsize=8, rotation=45)
     if fig is not None:
         fig.tight_layout()
         if save_path:

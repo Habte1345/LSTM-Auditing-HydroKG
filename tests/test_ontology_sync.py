@@ -29,3 +29,4 @@ def test_violation_classes_declared():
     ttl_text = _TTL_PATH.read_text()
     for meta in RULE_METADATA.values():
         assert f"hkg:{meta['violation_class']} a hkg:ViolationClass" in ttl_text
+
