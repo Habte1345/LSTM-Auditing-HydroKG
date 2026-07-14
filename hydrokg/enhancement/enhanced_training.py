@@ -148,19 +148,31 @@ class EnhancedTrainingPipeline:
         ).to(device_t)
 
         weight_file = self.run_dir / "model_epoch5.pt"
-        state_dict = torch.load(weight_file, map_location=device_t)
-        try:
-            model.load_state_dict(state_dict)
-            logger.info("Loaded pretrained weights with matching input size (%d).", input_size_dyn)
-        except RuntimeError as exc:
+        checkpoint_state = torch.load(weight_file, map_location=device_t)
+        model_state = model.state_dict()
+
+        # strict=False in PyTorch only skips MISSING/UNEXPECTED keys -- it still raises on
+        # keys present in both state dicts whose shapes differ, which is exactly what
+        # happens to lstm.weight_ih (the only parameter whose shape depends on
+        # input_size_dyn; weight_hh, bias, and fc.weight/bias are all independent of it --
+        # verified against Scripts/lstm.py). So shape-matched keys are warm-started from
+        # the checkpoint and the one shape-mismatched key is left at its random init,
+        # rather than either crashing (plain strict=False) or discarding the whole
+        # checkpoint.
+        compatible = {k: v for k, v in checkpoint_state.items()
+                      if k in model_state and model_state[k].shape == v.shape}
+        skipped = sorted(set(checkpoint_state.keys()) - set(compatible.keys()))
+        model_state.update(compatible)
+        model.load_state_dict(model_state)
+        if skipped:
             logger.warning(
-                "Pretrained weights don't match the new input size (%d, +7 vs. the "
-                "original %d static features) -- %s. Loading everything except the "
-                "input-facing LSTM weights (strict=False); those layers warm-start from "
-                "random init for the new embedding dimensions.",
-                input_size_dyn, n_static - 7, exc,
+                "Warm-started %d/%d pretrained parameters; %s left at random init due to "
+                "the input-size change from the violation embedding (expected: only the "
+                "input-facing LSTM weight should differ).",
+                len(compatible), len(checkpoint_state), skipped,
             )
-            model.load_state_dict(state_dict, strict=False)
+        else:
+            logger.info("Loaded all %d pretrained parameters with matching shapes.", len(compatible))
 
         ds = CamelsH5(
             h5_file=self.run_dir / "data" / "train" / "train_data.h5",
