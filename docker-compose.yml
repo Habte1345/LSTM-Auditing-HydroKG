@@ -1,0 +1,39 @@
+# Local/HPC Neo4j deployment for HydroKG's production graph backend.
+#
+# Usage:
+#   export NEO4J_PASSWORD=<choose a real password>
+#   docker compose up -d
+#   # Browser UI at http://localhost:7474, Bolt at bolt://localhost:7687
+#
+# This was authored and reviewed but not run in the sandbox this repo was built in (no
+# Docker/server binaries available, restricted egress) -- validate it in your own
+# environment (local machine or UA HPC via the OnDemand portal / a compute node with
+# Docker or Singularity/Apptainer support) before relying on it for the CIROH-scale run.
+#
+# For Apptainer/Singularity on HPC without Docker, pull the same image with:
+#   apptainer pull neo4j.sif docker://neo4j:5.24-community
+
+services:
+  neo4j:
+    image: neo4j:5.24-community
+    container_name: hydrokg-neo4j
+    ports:
+      - "7474:7474"   # HTTP browser UI
+      - "7687:7687"   # Bolt protocol (used by hydrokg.graph.neo4j_store)
+    environment:
+      NEO4J_AUTH: "neo4j/${NEO4J_PASSWORD:?Set NEO4J_PASSWORD before starting}"
+      NEO4J_dbms_memory_heap_max__size: "4G"
+      NEO4J_dbms_memory_pagecache_size: "2G"
+      NEO4J_PLUGINS: '["apoc"]'
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+    healthcheck:
+      test: ["CMD", "cypher-shell", "-u", "neo4j", "-p", "${NEO4J_PASSWORD}", "RETURN 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+
+volumes:
+  neo4j_data:
+  neo4j_logs:

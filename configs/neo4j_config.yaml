@@ -1,0 +1,9 @@
+# Neo4j connection settings. Never put real credentials in this file if you commit it --
+# use environment variable substitution in your own copy, or pass --neo4j_password on the
+# command line / via a secrets manager. The values below match docker-compose.yml's
+# defaults for local development only.
+
+uri: bolt://localhost:7687
+user: neo4j
+password: ${NEO4J_PASSWORD}   # set via environment; docker-compose.yml reads the same var
+database: neo4j

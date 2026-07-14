@@ -1,0 +1,3 @@
+[submodule "external/HydroAuditToolFrameowrk"]
+	path = external/HydroAuditToolFrameowrk
+	url = https://github.com/Habte1345/HydroAuditToolFrameowrk.git

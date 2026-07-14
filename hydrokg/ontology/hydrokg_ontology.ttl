@@ -1,0 +1,149 @@
+@prefix hkg: <https://waterfootprint-lab.github.io/hydrokg/ontology#> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+
+#################################################################
+# HydroKG Ontology
+#
+# This schema is the source of truth for entity/relationship names used
+# throughout hydrokg/graph/*. Both the Neo4j backend (node labels /
+# relationship types) and the in-memory dev backend are generated to match
+# this file's vocabulary 1:1 -- see hydrokg/graph/schema.py.
+#################################################################
+
+<https://waterfootprint-lab.github.io/hydrokg/ontology> a owl:Ontology ;
+    rdfs:label "HydroKG: Hydrologic Knowledge Graph for LSTM Auditing" ;
+    rdfs:comment "Schema for auditing LSTM streamflow predictions against physically interpretable hydrologic rules." .
+
+#################################################################
+# Classes (node labels in Neo4j)
+#################################################################
+
+hkg:Catchment a owl:Class ;
+    rdfs:comment "A CAMELS/USGS basin. Identified by its 8-digit USGS gauge id." .
+
+hkg:TimeStep a owl:Class ;
+    rdfs:comment "A single calendar day, shared across all basins." .
+
+hkg:Prediction a owl:Class ;
+    rdfs:comment "One LSTM-simulated discharge value for one catchment at one timestep." .
+
+hkg:Observation a owl:Class ;
+    rdfs:comment "One USGS-observed discharge value for one catchment at one timestep." .
+
+hkg:Rule a owl:Class ;
+    rdfs:comment "One of R0-R6. A fixed, small set of nodes created once at graph initialization." .
+
+hkg:Violation a owl:Class ;
+    rdfs:comment "A detected violation of a Rule by a Prediction, with full traceable context." .
+
+hkg:ViolationClass a owl:Class ;
+    rdfs:comment "One of the four failure classes: PhysicalImpossibility, MagnitudeFailure, TimingFailure, BudgetScaleFailure." .
+
+hkg:AridityClass a owl:Class ;
+    rdfs:comment "Basin-level aridity stratum derived from CAMELS static attributes (e.g. humid, sub-humid, semi-arid, arid)." .
+
+hkg:LandCoverClass a owl:Class ;
+    rdfs:comment "Basin-level dominant land-cover stratum derived from CAMELS static attributes." .
+
+hkg:AnnualWindow a owl:Class ;
+    rdfs:comment "A rolling or water-year annual accumulation window used for R5/R6 evaluation." .
+
+hkg:EventWindow a owl:Class ;
+    rdfs:comment "An event-scale window (e.g. a storm/peak period) used for R4 evaluation." .
+
+#################################################################
+# Object properties (relationship types in Neo4j)
+#################################################################
+
+hkg:hasDischarge a owl:ObjectProperty ;
+    rdfs:domain hkg:Prediction , hkg:Observation ;
+    rdfs:comment "Links a Prediction or Observation node to its discharge value (stored as a property, not a separate node, for scale)." .
+
+hkg:forCatchment a owl:ObjectProperty ;
+    rdfs:domain hkg:Prediction , hkg:Observation , hkg:Violation ;
+    rdfs:range hkg:Catchment .
+
+hkg:hasTimeStep a owl:ObjectProperty ;
+    rdfs:domain hkg:Prediction , hkg:Observation , hkg:Violation ;
+    rdfs:range hkg:TimeStep .
+
+hkg:hasRule a owl:ObjectProperty ;
+    rdfs:domain hkg:Violation ;
+    rdfs:range hkg:Rule .
+
+hkg:violatesRule a owl:ObjectProperty ;
+    rdfs:domain hkg:Prediction ;
+    rdfs:range hkg:Rule ;
+    rdfs:comment "Direct shortcut edge from Prediction to Rule, in addition to the full Violation node, for fast traversal." .
+
+hkg:hasViolationClass a owl:ObjectProperty ;
+    rdfs:domain hkg:Rule ;
+    rdfs:range hkg:ViolationClass .
+
+hkg:hasAridityClass a owl:ObjectProperty ;
+    rdfs:domain hkg:Catchment , hkg:Violation ;
+    rdfs:range hkg:AridityClass .
+
+hkg:hasLandCoverClass a owl:ObjectProperty ;
+    rdfs:domain hkg:Catchment , hkg:Violation ;
+    rdfs:range hkg:LandCoverClass .
+
+hkg:withinAnnualWindow a owl:ObjectProperty ;
+    rdfs:domain hkg:Violation ;
+    rdfs:range hkg:AnnualWindow ;
+    rdfs:comment "Used for R5/R6 violations only." .
+
+hkg:withinEventWindow a owl:ObjectProperty ;
+    rdfs:domain hkg:Violation ;
+    rdfs:range hkg:EventWindow ;
+    rdfs:comment "Used for R4 violations only." .
+
+hkg:analogousTo a owl:ObjectProperty ;
+    rdfs:domain hkg:Catchment ;
+    rdfs:range hkg:Catchment ;
+    rdfs:comment "Symmetric similarity edge between catchments sharing AridityClass and LandCoverClass, used by graph-analogy correction. Weighted by inverse violation-rate similarity (see enhancement/graph_analogy_correction.py)." .
+
+#################################################################
+# Data properties (node/relationship properties)
+#################################################################
+
+hkg:gaugeId a owl:DatatypeProperty ; rdfs:domain hkg:Catchment ; rdfs:range xsd:string .
+hkg:date a owl:DatatypeProperty ; rdfs:domain hkg:TimeStep ; rdfs:range xsd:date .
+hkg:dischargeValue a owl:DatatypeProperty ; rdfs:range xsd:float .
+hkg:ruleId a owl:DatatypeProperty ; rdfs:domain hkg:Rule ; rdfs:range xsd:string ;
+    rdfs:comment "One of R0, R1, R2, R3, R4, R5, R6." .
+hkg:ruleName a owl:DatatypeProperty ; rdfs:domain hkg:Rule ; rdfs:range xsd:string .
+hkg:failureType a owl:DatatypeProperty ; rdfs:domain hkg:Rule ; rdfs:range xsd:string ;
+    rdfs:comment "'physical_failure' or 'predictive_error', per the manuscript's classification." .
+hkg:violationMagnitude a owl:DatatypeProperty ; rdfs:domain hkg:Violation ; rdfs:range xsd:float ;
+    rdfs:comment "Signed magnitude of the violation in rule-specific units (e.g. mm/day deficit, days of timing error)." .
+hkg:violationBurden a owl:DatatypeProperty ; rdfs:domain hkg:Catchment ; rdfs:range xsd:float ;
+    rdfs:comment "V_b per Eq. 3: mean normalized violation frequency across the 7 rules." .
+hkg:kge a owl:DatatypeProperty ; rdfs:domain hkg:Catchment ; rdfs:range xsd:float .
+
+#################################################################
+# Rule instances (fixed vocabulary, created once at graph init)
+#################################################################
+
+hkg:R0 a hkg:Rule ; hkg:ruleId "R0" ; hkg:ruleName "Negative flow" ;
+    hkg:failureType "physical_failure" ; hkg:hasViolationClass hkg:PhysicalImpossibility .
+hkg:R1 a hkg:Rule ; hkg:ruleId "R1" ; hkg:ruleName "Extreme ratio" ;
+    hkg:failureType "predictive_error" ; hkg:hasViolationClass hkg:MagnitudeFailure .
+hkg:R2 a hkg:Rule ; hkg:ruleId "R2" ; hkg:ruleName "Zero-flow collapse" ;
+    hkg:failureType "predictive_error" ; hkg:hasViolationClass hkg:PhysicalImpossibility .
+hkg:R3 a hkg:Rule ; hkg:ruleId "R3" ; hkg:ruleName "High relative error" ;
+    hkg:failureType "predictive_error" ; hkg:hasViolationClass hkg:MagnitudeFailure .
+hkg:R4 a hkg:Rule ; hkg:ruleId "R4" ; hkg:ruleName "Peak-timing error" ;
+    hkg:failureType "predictive_error" ; hkg:hasViolationClass hkg:TimingFailure .
+hkg:R5 a hkg:Rule ; hkg:ruleId "R5" ; hkg:ruleName "Annual mass balance" ;
+    hkg:failureType "physical_failure" ; hkg:hasViolationClass hkg:BudgetScaleFailure .
+hkg:R6 a hkg:Rule ; hkg:ruleId "R6" ; hkg:ruleName "Budyko consistency" ;
+    hkg:failureType "physical_failure" ; hkg:hasViolationClass hkg:BudgetScaleFailure .
+
+hkg:PhysicalImpossibility a hkg:ViolationClass .
+hkg:MagnitudeFailure a hkg:ViolationClass .
+hkg:TimingFailure a hkg:ViolationClass .
+hkg:BudgetScaleFailure a hkg:ViolationClass .

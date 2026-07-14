@@ -1,0 +1,36 @@
+# Default configuration for HydroKG runs against real CAMELS data / submodule outputs.
+# CLI arguments override these values; nothing here should be treated as a hardcoded path
+# the way the submodule's own committed cfg.json examples are.
+
+camels_root: null            # e.g. /path/to/CAMELS_US
+predictions_pickle: null     # e.g. external/HydroAuditToolFrameowrk/runs/<run>/lstm_seed<seed>.p
+stratification_db: null      # e.g. external/HydroAuditToolFrameowrk/runs/<run>/attributes.db
+
+graph_backend: memory        # memory | neo4j
+
+rules:
+  R0: {}
+  R1:
+    low_ratio: 0.2
+    high_ratio: 5.0
+  R2:
+    sim_zero_abs: 0.01
+    obs_large_frac: 0.10
+  R3:
+    relative_error_threshold: 1.0   # NOT numerically specified in the manuscript draft; see docs/RULES.md
+  R4:
+    max_lag_days: 2
+  R5: {}
+  R6: {}
+
+enhancement:
+  curriculum:
+    temperature: 1.0
+    floor_weight: 0.1
+  analogy_correction:
+    top_k: 5
+    rules_corrected: [R0, R1, R2, R3]   # event/annual rules (R4-R6) are not point-corrected
+
+skill_trust:
+  kge_threshold: 0.5
+  burden_threshold: 0.05

@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+
+# Environments
+.venv/
+venv/
+.env
+
+# Data (never commit CAMELS or large run outputs)
+*.h5
+*.p
+*.pkl
+*.db
+data/raw/
+data/cache/
+external/HydroAuditToolFrameowrk/runs/
+external/HydroAuditToolFrameowrk/data/
+
+# Neo4j local volume
+neo4j_data/
+neo4j_logs/
+
+# Graph exports (regenerate, don't commit)
+*.ttl.bak
+graph_exports/
+
+# Notebooks checkpoints
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/

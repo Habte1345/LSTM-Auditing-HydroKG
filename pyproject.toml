@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hydrokg"
+version = "0.1.0a0"
+description = "Knowledge-graph auditing and enhancement framework for LSTM streamflow predictions"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [{ name = "Habtamu Dagne, Water Footprint Lab, University of Alabama" }]
+
+dependencies = [
+  "numpy>=1.24",
+  "pandas>=2.0",
+  "scipy>=1.10",
+  "matplotlib>=3.7",
+  "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+neo4j = ["neo4j>=5.20"]
+torch = ["torch>=2.1"]
+dev = ["pytest>=7.4", "pytest-cov"]
+all = ["hydrokg[neo4j,torch,dev]"]
+
+[project.scripts]
+hydrokg-audit = "hydrokg.cli.run_offline_audit:main"
+hydrokg-realtime-audit = "hydrokg.cli.run_realtime_audit:main"
+hydrokg-enhance-demo = "hydrokg.cli.run_enhanced_training:main"
+
+[tool.setuptools.packages.find]
+include = ["hydrokg*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
