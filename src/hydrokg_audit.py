@@ -18,9 +18,9 @@ from typing import Optional
 
 import pandas as pd
 
-from hydrokg.evaluation import calc_kge
-from hydrokg.graph import GraphStore, RULE_IDS, RULE_METADATA
-from hydrokg.rules import build_all_rules
+from hydrokg_evaluation import calc_kge
+from hydrokg_graph import GraphStore, RULE_IDS, RULE_METADATA
+from hydrokg_rules import build_all_rules
 
 logger = logging.getLogger(__name__)
 

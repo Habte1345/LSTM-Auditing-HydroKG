@@ -32,43 +32,47 @@ balance, Budyko) need a full water-year of calendar-dated data an isolated train
 sequence can't carry — they remain audit-only (before/after training). See
 `docs/ARCHITECTURE.md`.
 
-## Repository layout
+## Repository layout — fully flat, no subfolders in src/ or scripts/
 
 ```
 LSTM-Auditing-HydroKG/
-├── src/hydrokg/            <- the package (9 files total, see below)
-│   ├── rules.py             R0-R6 + base class + registry
-│   ├── graph.py             GraphStore interface + in-memory + Neo4j backends + factory
-│   ├── audit.py             OfflineAuditor + violation burden (Eq. 3)
-│   ├── data.py              Precipitation loading, ET residual, aridity/land-cover strat
-│   ├── adapters.py          The ONLY place that imports the untouched submodule
-│   ├── enhancement.py       All 3 enhancement mechanisms + the training pipeline
-│   ├── evaluation.py        KGE, skill-trust analysis, Eq. 4-6, stratified summaries
-│   ├── viz.py               Publication-quality figures
-│   ├── ontology/hydrokg_ontology.ttl   RDF/OWL schema (source of truth)
-│   └── cli/
-│       ├── run_offline_audit.py       `python -m hydrokg.cli.run_offline_audit`
-│       └── run_enhanced_training.py   `python -m hydrokg.cli.run_enhanced_training`
+├── src/
+│   ├── hydrokg_rules.py         R0-R6 + base class + registry
+│   ├── hydrokg_graph.py         GraphStore interface + in-memory + Neo4j backends
+│   ├── hydrokg_audit.py         OfflineAuditor + violation burden (Eq. 3)
+│   ├── hydrokg_data.py          Precipitation loading, ET residual, aridity/land-cover strat
+│   ├── hydrokg_adapters.py      The ONLY file that imports the untouched submodule
+│   ├── hydrokg_enhancement.py   All 3 enhancement mechanisms + the training pipeline
+│   ├── hydrokg_evaluation.py    KGE, skill-trust analysis, Eq. 4-6, stratified summaries
+│   ├── hydrokg_viz.py           Publication-quality figures
+│   └── hydrokg_ontology.ttl     RDF/OWL schema (source of truth)
+├── scripts/
+│   ├── run_offline_audit.py         python scripts/run_offline_audit.py ...
+│   ├── run_enhanced_training.py     python scripts/run_enhanced_training.py ...
+│   ├── init_neo4j_schema.cypher     standalone schema init, mirrors hydrokg_graph.py
+│   └── run_enhancement_uahpc.slurm  SLURM submission template
 ├── external/HydroAuditToolFrameowrk/  <- git submodule, UNTOUCHED (Kratzert et al. LSTM)
-├── scripts/                 Neo4j schema init, UAHPC SLURM submission template
 ├── data/                    Put/symlink your CAMELS_US dataset here (gitignored)
 ├── results/                 CLI output lands here (gitignored)
 ├── figures/                 Generated figures land here (gitignored)
 ├── notebook/                Real-data results analysis notebook (no synthetic data)
 ├── docs/                    ARCHITECTURE.md, ONTOLOGY.md, RULES.md, METHODOLOGY.md
-├── configs/, docker-compose.yml, pyproject.toml
+├── configs/, docker-compose.yml
+├── requirements.txt, requirements-torch.txt, requirements-neo4j.txt
 ```
 
-No `tests/` directory for now (removed intentionally — see project history; add it back
-once the offline and real-time simulation runs are validated end to end).
+No `tests/` directory for now (removed intentionally — add back once the offline and
+real-time simulation runs are validated end to end). No installed package either —
+`scripts/*.py` add the sibling `src/` directory to `sys.path` themselves, so nothing
+needs `pip install -e .`; just install the dependencies.
 
 ## Installation
 
 ```bash
 git clone --recurse-submodules https://github.com/<your-username>/LSTM-Auditing-HydroKG.git
 cd LSTM-Auditing-HydroKG
-pip install -e ".[torch]"          # torch, numba, h5py, scikit-learn -- needed for the real pipeline
-docker compose up -d neo4j         # optional; in-memory backend needs no server
+pip install -r requirements-torch.txt   # needed for the real fine-tuning pipeline
+docker compose up -d neo4j              # optional; in-memory backend needs no server
 ```
 
 If you already cloned without `--recurse-submodules`:
@@ -82,7 +86,7 @@ git submodule update --init --recursive
 **1. Audit a completed LSTM run:**
 
 ```bash
-python -m hydrokg.cli.run_offline_audit \
+python scripts/run_offline_audit.py \
   --predictions_pickle external/HydroAuditToolFrameowrk/runs/<run_dir>/lstm_seed<seed>.p \
   --camels_root data/CAMELS_US \
   --stratification_db external/HydroAuditToolFrameowrk/runs/<run_dir>/attributes.db \
@@ -93,7 +97,7 @@ python -m hydrokg.cli.run_offline_audit \
 fine-tuning -> regenerate predictions -> graph-analogy correction -> final audit):
 
 ```bash
-python -m hydrokg.cli.run_enhanced_training \
+python scripts/run_enhanced_training.py \
   --run_dir external/HydroAuditToolFrameowrk/runs/<run_dir> \
   --camels_root data/CAMELS_US \
   --predictions_pickle external/HydroAuditToolFrameowrk/runs/<run_dir>/lstm_seed<seed>.p \
@@ -105,7 +109,8 @@ python -m hydrokg.cli.run_enhanced_training \
 `results/hydrokg_run1_*` files, and it produces the skill-trust and enhancement figures
 into `figures/`.
 
-**HPC (SLURM):** see `scripts/run_enhancement_uahpc.slurm` for a submission template.
+**HPC (SLURM):** `sbatch scripts/run_enhancement_uahpc.slurm` (edit the paths at the top
+of that file for your setup first).
 
 ## Citation
 

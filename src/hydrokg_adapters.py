@@ -21,7 +21,7 @@ from typing import Optional
 
 import pandas as pd
 
-_SUBMODULE_ROOT = Path(__file__).resolve().parents[2] / "external" / "HydroAuditToolFrameowrk"
+_SUBMODULE_ROOT = Path(__file__).resolve().parents[1] / "external" / "HydroAuditToolFrameowrk"
 
 
 def _ensure_submodule_on_path() -> Path:

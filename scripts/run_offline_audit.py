@@ -3,7 +3,7 @@ Offline audit CLI -- audits a completed LSTM's predictions against R0-R6 and rep
 the skill-trust relationship. Real data only; no demo/synthetic mode.
 
 Usage:
-    python -m hydrokg.cli.run_offline_audit \
+    python scripts/run_offline_audit.py \
         --predictions_pickle external/HydroAuditToolFrameowrk/runs/<run>/lstm_seed<seed>.p \
         --camels_root /path/to/CAMELS_US \
         --graph_backend memory
@@ -11,14 +11,22 @@ Usage:
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+# Flat repo layout: no installed package -- add the sibling src/ directory to
+# sys.path so `import hydrokg_*` resolves regardless of the current working
+# directory this script is invoked from.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
 import argparse
 import logging
 
 import pandas as pd
 
-from hydrokg.audit import OfflineAuditor
-from hydrokg.evaluation import summarize_skill_trust
-from hydrokg.graph import build_graph_store
+from hydrokg_audit import OfflineAuditor
+from hydrokg_evaluation import summarize_skill_trust
+from hydrokg_graph import build_graph_store
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -42,8 +50,8 @@ def main():
     else:
         graph = build_graph_store("memory")
 
-    from hydrokg.adapters import load_predictions_pickle
-    from hydrokg.data import load_basin_stratification, attach_precipitation
+    from hydrokg_adapters import load_predictions_pickle
+    from hydrokg_data import load_basin_stratification, attach_precipitation
 
     basins = load_predictions_pickle(args.predictions_pickle)
     if args.camels_root:

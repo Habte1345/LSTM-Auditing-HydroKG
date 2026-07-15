@@ -1,6 +1,6 @@
 # HydroKG Ontology
 
-Canonical schema: [`src/hydrokg/ontology/hydrokg_ontology.ttl`](../src/hydrokg/ontology/hydrokg_ontology.ttl)
+Canonical schema: [`src/hydrokg_ontology.ttl`](../src/hydrokg_ontology.ttl)
 (OWL/RDF, Turtle syntax). This document is a readable companion to that file and maps each
 ontology term to its concrete implementation in both graph backends.
 
@@ -45,7 +45,7 @@ supports it without a schema change.
 ## Fixed rule vocabulary
 
 Seven `Rule` nodes and four `ViolationClass` nodes are created once, at
-`GraphStore.initialize_schema()` — see `src/hydrokg/graph.py::RULE_METADATA` (the
+`GraphStore.initialize_schema()` — see `src/hydrokg_graph.py::RULE_METADATA` (the
 Python source of truth, checked against the `.ttl` file by
 `tests/test_ontology_sync.py`) and `scripts/init_neo4j_schema.cypher` (a standalone Cypher
 version for manual inspection independent of the Python driver).
@@ -54,9 +54,9 @@ version for manual inspection independent of the Python driver).
 
 If you add an eighth rule or a new stratification dimension:
 
-1. Add it to `src/hydrokg/ontology/hydrokg_ontology.ttl` first (source of truth).
-2. Add the matching entry to `src/hydrokg/graph.py::RULE_METADATA` (or a new constants
+1. Add it to `src/hydrokg_ontology.ttl` first (source of truth).
+2. Add the matching entry to `src/hydrokg_graph.py::RULE_METADATA` (or a new constants
    block for a new stratification dimension).
-3. Add a new `Rule` subclass in `src/hydrokg/rules.py` and register it in
-   `src/hydrokg/rules.py::RULE_CLASSES`.
+3. Add a new `Rule` subclass in `src/hydrokg_rules.py` and register it in
+   `src/hydrokg_rules.py::RULE_CLASSES`.
 4. Run `tests/test_ontology_sync.py` — it will fail loudly if the two drift apart.

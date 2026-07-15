@@ -1,0 +1,2 @@
+# Optional: only needed if using --graph_backend neo4j instead of the default in-memory backend.
+neo4j>=5.20

@@ -6,7 +6,7 @@ real-time fine-tuning -> regenerate predictions -> re-audit -> graph-analogy cor
 enhanced_results) saved as CSVs, ready for hydrokg.evaluation.compute_deltas and the
 skill-trust/enhancement figure panels. Real data only; no demo/synthetic mode.
 
-    python -m hydrokg.cli.run_enhanced_training \
+    python scripts/run_enhanced_training.py \
         --run_dir external/HydroAuditToolFrameowrk/runs/<run> \
         --camels_root /path/to/CAMELS_US \
         --predictions_pickle external/HydroAuditToolFrameowrk/runs/<run>/lstm_seed<seed>.p \
@@ -21,6 +21,14 @@ correction), rather than one log line per basin/epoch/warning.
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+# Flat repo layout: no installed package -- add the sibling src/ directory to
+# sys.path so `import hydrokg_*` resolves regardless of the current working
+# directory this script is invoked from.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
 import argparse
 import logging
 import warnings
@@ -28,8 +36,8 @@ import warnings
 import pandas as pd
 from tqdm import tqdm
 
-from hydrokg.audit import OfflineAuditor
-from hydrokg.graph import build_graph_store
+from hydrokg_audit import OfflineAuditor
+from hydrokg_graph import build_graph_store
 
 # Only our own step banners and warnings should reach the console; third-party library
 # noise (pandas, torch, h5py) is suppressed here.
@@ -44,10 +52,10 @@ def step(n: int, total: int, message: str) -> None:
 
 
 def run_real(args):
-    from hydrokg.adapters import load_predictions_pickle
-    from hydrokg.data import load_basin_stratification, attach_precipitation
-    from hydrokg.enhancement import EnhancedTrainingPipeline
-    from hydrokg.evaluation import enhancement_summary
+    from hydrokg_adapters import load_predictions_pickle
+    from hydrokg_data import load_basin_stratification, attach_precipitation
+    from hydrokg_enhancement import EnhancedTrainingPipeline
+    from hydrokg_evaluation import enhancement_summary
 
     graph = build_graph_store("memory") if args.graph_backend == "memory" else build_graph_store(
         "neo4j", uri=args.neo4j_uri, user=args.neo4j_user, password=args.neo4j_password

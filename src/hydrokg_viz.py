@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from hydrokg.graph import RULE_IDS, RULE_METADATA
+from hydrokg_graph import RULE_IDS, RULE_METADATA
 
 _CLASS_COLORS = {
     "PhysicalImpossibility": "#B23A48",

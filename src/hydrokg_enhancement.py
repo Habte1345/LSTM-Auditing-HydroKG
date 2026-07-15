@@ -67,8 +67,8 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
-from hydrokg.adapters import _ensure_submodule_on_path, load_run_config
-from hydrokg.graph import GraphStore, RULE_IDS
+from hydrokg_adapters import _ensure_submodule_on_path, load_run_config
+from hydrokg_graph import GraphStore, RULE_IDS
 
 logger = logging.getLogger(__name__)
 
@@ -188,7 +188,7 @@ def write_embeddings_to_attributes_db(source_db_path: str | Path, target_db_path
 def n_static_features(db_path: str | Path, basins: list[str]) -> int:
     """Number of static attribute columns CamelsH5 will actually load for these basins
     from `db_path` (post INVALID_ATTR filtering) -- use instead of a hardcoded count."""
-    from hydrokg.adapters import load_camels_attributes
+    from hydrokg_adapters import load_camels_attributes
     return load_camels_attributes(db_path, basins).shape[1]
 
 
@@ -313,7 +313,7 @@ class EnhancedTrainingPipeline:
         if rebuilt_h5.exists():
             return rebuilt_h5
 
-        from hydrokg.adapters import create_h5_dataset
+        from hydrokg_adapters import create_h5_dataset
         train_start = pd.to_datetime(self.run_cfg["train_start"], format="%d%m%Y")
         train_end = pd.to_datetime(self.run_cfg["train_end"], format="%d%m%Y")
         tqdm.write(
@@ -347,7 +347,7 @@ class EnhancedTrainingPipeline:
         from src.main import Model  # noqa: E402 (submodule import)
         from Scripts.nseloss import NSELoss  # noqa: E402
 
-        from hydrokg.rules import DAILY_RULES, build_all_rules
+        from hydrokg_rules import DAILY_RULES, build_all_rules
         daily_rules = {rid: rule for rid, rule in build_all_rules().items() if rid in DAILY_RULES}
 
         device_t = torch.device(device)

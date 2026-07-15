@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from hydrokg.adapters import load_camels_attributes, load_forcing_for_basin
+from hydrokg_adapters import load_camels_attributes, load_forcing_for_basin
 
 # ============================================================================
 # Precipitation loading (for R5/R6)

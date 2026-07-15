@@ -24,7 +24,7 @@ from typing import Optional
 
 import pandas as pd
 
-from hydrokg.graph import ViolationRecord
+from hydrokg_graph import ViolationRecord
 
 # ============================================================================
 # Base class

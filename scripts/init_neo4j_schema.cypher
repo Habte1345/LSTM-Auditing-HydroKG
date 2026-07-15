@@ -14,7 +14,7 @@ FOR (v:Violation) ON (v.basin_id, v.rule_id);
 CREATE INDEX violation_timestamp IF NOT EXISTS
 FOR (v:Violation) ON (v.timestamp);
 
-// Fixed rule vocabulary (R0-R6), per hydrokg/ontology/hydrokg_ontology.ttl
+// Fixed rule vocabulary (R0-R6), per src/hydrokg_ontology.ttl
 MERGE (r0:Rule {rule_id: "R0"}) SET r0.name = "Negative flow", r0.failure_type = "physical_failure"
 MERGE (vc0:ViolationClass {name: "PhysicalImpossibility"})
 MERGE (r0)-[:HAS_VIOLATION_CLASS]->(vc0);

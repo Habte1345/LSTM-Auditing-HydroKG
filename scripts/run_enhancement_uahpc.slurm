@@ -26,7 +26,7 @@ conda activate "$CONDA_ENV"
 
 export PYTHONUNBUFFERED=1
 
-python -m hydrokg.cli.run_enhanced_training \
+python scripts/run_enhanced_training.py \
   --run_dir "$RUN_DIR" \
   --camels_root "$CAMELS_ROOT" \
   --predictions_pickle "$RUN_DIR/lstm_seed658.p" \

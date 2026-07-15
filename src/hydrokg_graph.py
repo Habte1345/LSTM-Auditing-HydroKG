@@ -4,7 +4,7 @@ backend implementations (in-memory dev/test, production Neo4j), plus the factory
 picks between them. Merged into one file (was 6 files) since they're always used
 together and none is large on its own.
 
-Canonical schema (entities/relationships as RDF/OWL): hydrokg/ontology/hydrokg_ontology.ttl.
+Canonical schema (entities/relationships as RDF/OWL): src/hydrokg_ontology.ttl.
 See docs/ONTOLOGY.md for the full mapping from that ontology to the node labels /
 relationship types used here.
 
@@ -31,7 +31,7 @@ except ImportError:  # pragma: no cover - optional dependency
     GraphDatabase = None
 
 # ============================================================================
-# Schema constants (mirror hydrokg/ontology/hydrokg_ontology.ttl 1:1)
+# Schema constants (mirror src/hydrokg_ontology.ttl 1:1)
 # ============================================================================
 
 RULE_IDS = ["R0", "R1", "R2", "R3", "R4", "R5", "R6"]
