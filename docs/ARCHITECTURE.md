@@ -12,12 +12,12 @@ which basin, which rule, which timestep, which aridity/land-cover class, how it 
 other basins — and uses queries over that structure to drive three enhancement mechanisms
 that sit entirely outside the loss function:
 
-1. **Query-driven curriculum reweighting** (`hydrokg/enhancement/curriculum.py`) — changes
+1. **Query-driven curriculum reweighting** (`src/hydrokg/enhancement.py (ViolationCurriculumSampler)`) — changes
    which training examples the model sees next, based on a graph query.
-2. **Graph-analogy correction** (`hydrokg/enhancement/graph_analogy_correction.py`) —
+2. **Graph-analogy correction** (`src/hydrokg/enhancement.py (GraphAnalogyCorrector)`) —
    changes the model's output after the forward pass, based on a graph traversal to
    similar, low-violation basins.
-3. **Violation-history embeddings** (`hydrokg/enhancement/violation_embeddings.py`) —
+3. **Violation-history embeddings** (`src/hydrokg/enhancement.py (build_embedding_matrix)`) —
    changes the model's input, by exposing each basin's own violation profile as an
    auxiliary feature.
 
@@ -39,44 +39,55 @@ hydrokg.audit.OfflineAuditor
 GraphStore.write_violations()  +  GraphStore.set_basin_metrics(kge, violation_burden)
         │
         ▼
-hydrokg.evaluation.skill_trust_analysis  →  is high KGE actually physically trustworthy?
-hydrokg.viz.skill_trust_plots            →  the figure that shows the skill-trust gap
+hydrokg.evaluation.summarize_skill_trust  →  is high KGE actually physically trustworthy?
+hydrokg.viz.plot_skill_trust_scatter      →  the figure that shows the skill-trust gap
 ```
 
-### Real-time (online) audit
+### Real-time (online) detection during fine-tuning
+
+An earlier version of this codebase included a generic `RealtimeAuditor` class for
+staged streaming evaluation of all seven rules. It was removed: the real study never
+actually called it -- the real "real-time" mechanism lives inline inside
+`EnhancedTrainingPipeline.fine_tune()` (`src/hydrokg/enhancement.py`), scoped
+specifically to what training-time detection can actually support:
 
 ```
-LSTM inference loop, one prediction at a time
+Training loop, one batch at a time (inside fine_tune())
         │
         ▼
-hydrokg.audit.RealtimeAuditor.ingest(basin, t, q_sim, q_obs, p)
+every batch's own forward-pass output, rescaled to physical mm/day
         │
-        ├── R0-R3 (daily): evaluated on this single row, immediately
-        ├── R4 (event/water-year): evaluated once the water year closes
-        └── R5, R6 (annual): evaluated once the water year closes
+        ├── R0-R3 (daily, no calendar context needed): checked immediately against
+        │   this batch's own output -- zero extra forward passes, detached from the
+        │   loss/backward pass entirely
+        │
+        └── R4, R5, R6: NOT evaluated here -- they need a full water-year of
+            calendar-dated observations, which an isolated training sequence window
+            doesn't carry. These remain audit-only (OfflineAuditor, before/after
+            training), not real-time.
         │
         ▼
-GraphStore accumulates violations continuously
+GraphStore accumulates R0-R3 violations continuously, written the instant they're detected
         │
         ▼
-hydrokg.enhancement.*  (curriculum / analogy correction / embeddings) consume the
-graph's current state for the next training pass or the next inference call
+Between epochs: curriculum weights + violation embeddings (src/hydrokg/enhancement.py)
+are recomputed from the graph's current state -- reflecting the model's own most recent
+training-time behavior, not a frozen pre-training snapshot
 ```
 
-The staging (daily immediately, event/annual only at window close) is a direct
-implementation of the manuscript's requirement that "real-time auditing is staged rather
-than simultaneous" — each rule activates exactly when its required temporal context
-becomes available, not before.
+This is a real, stated scope limit: "real-time" in this codebase means R0-R3 during
+training, not all seven rules. Say this explicitly in the manuscript rather than
+implying uniform real-time treatment across the rule set.
 
 ## Graph backend: why two implementations exist
 
-`hydrokg.graph.base.GraphStore` is an abstract interface with two implementations:
+`hydrokg.graph.GraphStore` is an abstract interface with two implementations:
 
-- `hydrokg.graph.memory_store.InMemoryGraphStore` — plain pandas, no server, used for
+- `hydrokg.graph.InMemoryGraphStore` — plain pandas, no server, used for
   every test in `tests/` and the `--demo` CLI paths. This is what was actually exercised
   and validated while building this repository (no Docker/Neo4j binary was available in
   that environment).
-- `hydrokg.graph.neo4j_store.Neo4jGraphStore` — the production backend, using the
+- `hydrokg.graph.Neo4jGraphStore` — the production backend, using the
   official `neo4j` Python driver and real Cypher queries, intended for the full
   670-basin, multi-decade CAMELS run and CIROH-scale operational use.
 
@@ -91,7 +102,7 @@ against a live Neo4j instance before trusting the production backend.
 
 At 670 basins × ~30 years × 7 rules, materializing every daily (prediction, observation,
 rule-check) triple would be on the order of 10⁸-10⁹ facts, most of them "rule not
-violated" — of little value to any downstream consumer. `hydrokg/graph/schema.py`
+violated" — of little value to any downstream consumer. `src/hydrokg/graph.py`
 documents this explicitly: only violations (the exception) are written as graph facts.
 Curriculum reweighting, analogy correction, and violation embeddings all only need the
 violation record, not the full daily series (which remains in the pandas
@@ -101,7 +112,7 @@ DataFrames/H5 files already produced by the submodule).
 
 `external/HydroAuditToolFrameowrk` is a git submodule, **not modified in any way**. Its
 hardcoded local paths (`camels_root`, `run_dir` in its committed `cfg.json` examples) and
-lack of packaging (`setup.py`) are worked around entirely from `hydrokg/adapters/lstm_adapter.py`,
+lack of packaging (`setup.py`) are worked around entirely from `src/hydrokg/adapters.py`,
 which is the single place that adds the submodule's root to `sys.path` and calls its
 functions with config-driven arguments. If the submodule is ever updated upstream (e.g. a
 new commit fixing its packaging), nothing in `hydrokg/` needs to change as long as the

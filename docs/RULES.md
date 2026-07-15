@@ -8,13 +8,13 @@ manuscript rather than leaving them as this codebase's silent defaults.
 
 | Rule | Name | Failure type | Class | Scale | Implementation |
 |---|---|---|---|---|---|
-| R0 | Negative flow | Physical failure | Physical impossibility | Daily | `hydrokg/rules/r0_negative_flow.py` |
-| R1 | Extreme ratio | Predictive error | Magnitude failure | Daily | `hydrokg/rules/r1_extreme_ratio.py` |
-| R2 | Zero-flow collapse | Predictive error | Physical impossibility | Daily | `hydrokg/rules/r2_zero_flow_collapse.py` |
-| R3 | High relative error | Predictive error | Magnitude failure | Daily | `hydrokg/rules/r3_high_relative_error.py` |
-| R4 | Peak-timing error | Predictive error | Timing failure | Event/window | `hydrokg/rules/r4_peak_timing.py` |
-| R5 | Annual mass balance | Physical failure | Budget-scale failure | Annual | `hydrokg/rules/r5_mass_balance.py` |
-| R6 | Budyko consistency | Physical failure | Budget-scale failure | Annual | `hydrokg/rules/r6_budyko.py` |
+| R0 | Negative flow | Physical failure | Physical impossibility | Daily | `src/hydrokg/rules.py::NegativeFlowRule` |
+| R1 | Extreme ratio | Predictive error | Magnitude failure | Daily | `src/hydrokg/rules.py::ExtremeRatioRule` |
+| R2 | Zero-flow collapse | Predictive error | Physical impossibility | Daily | `src/hydrokg/rules.py::ZeroFlowCollapseRule` |
+| R3 | High relative error | Predictive error | Magnitude failure | Daily | `src/hydrokg/rules.py::HighRelativeErrorRule` |
+| R4 | Peak-timing error | Predictive error | Timing failure | Event/window | `src/hydrokg/rules.py::PeakTimingRule` |
+| R5 | Annual mass balance | Physical failure | Budget-scale failure | Annual | `src/hydrokg/rules.py::MassBalanceRule` |
+| R6 | Budyko consistency | Physical failure | Budget-scale failure | Annual | `src/hydrokg/rules.py::BudykoConsistencyRule` |
 
 ## R0 — Negative flow
 Unambiguous: `Q_sim < 0`. No tunable parameter.
@@ -70,13 +70,18 @@ an independent PET product is added to the pipeline, upgrade this rule to test a
 Fu's equation (or another parametric Budyko curve) rather than just its bounds.
 
 ## Where ET comes from for reporting (not for the rules themselves)
-`hydrokg/data/et_water_balance.py` computes a long-term water-balance ET residual
+`src/hydrokg/data.py` computes a long-term water-balance ET residual
 (`ET = P̄ - Q̄_obs`, assuming `dS/dt ≈ 0` over multi-decade CAMELS records — the standard
 large-sample-hydrology assumption) for basin-level diagnostics and figures. **R5 and R6
 do not use this function** — they operate on `P` and `Q_sim` directly over annual windows,
 deliberately avoiding compounding a noisy short-window ET residual into a per-year audit.
 
 ## Real-time staging (R0-R3 vs R4 vs R5/R6)
-`hydrokg/rules/registry.py` defines `DAILY_RULES`, `EVENT_RULES`, `ANNUAL_RULES` —
-consumed by `hydrokg.audit.RealtimeAuditor` to evaluate each rule only once its required
-temporal context is available (immediately for R0-R3, at water-year close for R4-R6).
+`src/hydrokg/rules.py` defines `DAILY_RULES`, `EVENT_RULES`, `ANNUAL_RULES`. Only
+`DAILY_RULES` (R0-R3) are evaluated in real time, inside
+`EnhancedTrainingPipeline.fine_tune()`'s training loop (`src/hydrokg/enhancement.py`) --
+directly against every batch's own forward-pass output, no extra inference needed. R4
+(event) and R5/R6 (annual) require a full water-year of calendar-dated observations
+that an isolated training sequence window doesn't carry, so they remain evaluated only
+by the offline `OfflineAuditor` (before and after training), never in real time. State
+this scope limit explicitly rather than implying uniform real-time treatment.

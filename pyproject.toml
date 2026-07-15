@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hydrokg"
-version = "0.1.0a0"
+version = "0.2.0"
 description = "Knowledge-graph auditing and enhancement framework for LSTM streamflow predictions"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -23,16 +23,15 @@ dependencies = [
 [project.optional-dependencies]
 neo4j = ["neo4j>=5.20"]
 torch = ["torch>=2.1", "numba>=0.58", "h5py>=3.9", "scikit-learn>=1.3"]
-dev = ["pytest>=7.4", "pytest-cov"]
-all = ["hydrokg[neo4j,torch,dev]"]
+all = ["hydrokg[neo4j,torch]"]
 
 [project.scripts]
 hydrokg-audit = "hydrokg.cli.run_offline_audit:main"
-hydrokg-realtime-audit = "hydrokg.cli.run_realtime_audit:main"
-hydrokg-enhance-demo = "hydrokg.cli.run_enhanced_training:main"
+hydrokg-enhance = "hydrokg.cli.run_enhanced_training:main"
 
 [tool.setuptools.packages.find]
+where = ["src"]
 include = ["hydrokg*"]
 
-[tool.pytest.ini_options]
-testpaths = ["tests"]
+[tool.setuptools.package-data]
+hydrokg = ["ontology/*.ttl"]
