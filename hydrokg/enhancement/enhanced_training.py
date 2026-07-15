@@ -8,20 +8,40 @@ End-to-end graph-guided enhancement pipeline, combining all three mechanisms:
      (hydrokg.enhancement.graph_analogy_correction)
 
 No physics-informed loss term is added anywhere in this file -- the loss function used
-for fine-tuning is the submodule's own NSELoss, unchanged. All three enhancement
-mechanisms operate outside the loss: on sample weighting (before the forward pass), on
-input features (via the attributes.db copy, before the forward pass), and on the model's
-output (after the forward pass, as an explicit post-processing step). This is the
-deliberate distinction from physics-informed-loss approaches per the project's design
-decision.
+for fine-tuning is the submodule's own NSELoss, unchanged, every batch, every epoch.
+
+REAL-TIME / TRAINING-SUPPORT MODE, PRECISELY: mechanisms 1 and 2 are NOT computed once
+before training and left frozen. fine_tune() runs an iterative loop:
+
+  for each epoch:
+      - curriculum weights (basin sampling probabilities) and the violation-embedding
+        attributes.db are rebuilt from the graph's CURRENT state (the baseline audit on
+        epoch 1; the PREVIOUS epoch's own online detections from epoch 2 onward)
+      - during training, every batch's own forward-pass output is rescaled back to
+        physical mm/day (via the submodule's rescale_features) and checked against R0-R3
+        directly -- no extra inference pass, purely a detached side channel that never
+        touches the loss or backward pass -- and any violation is written to the graph
+        IMMEDIATELY, not buffered to end-of-epoch
+      - the next epoch then trains against a graph, and therefore a curriculum/embedding,
+        that reflects the model's own most recent behavior, not a stale pre-training snapshot
+
+Scope limit, stated explicitly rather than implied: R4 (peak timing) and R5/R6 (annual
+mass balance, Budyko) are NOT evaluated inside this loop. They require a full water-year
+of calendar-dated observations, which an isolated training sequence window does not
+carry. Those three rules remain evaluated only at the coarser before/after audit
+granularity (baseline pre-training, final audit post-training) -- "real-time" in this
+codebase means R0-R3 during training, not all seven rules.
 
 Mechanism 2 implementation note: the 7-dim violation embedding is written as ordinary
 extra columns into a COPY of the run's attributes.db
 (violation_embeddings.write_embeddings_to_attributes_db), not concatenated directly onto
 the dynamic input tensor. CamelsH5 already reads static attributes per-basin from
 `db_path` and z-score-normalizes/concatenates them automatically
-(data/datasets.py::CamelsH5) -- so the embedding is included with zero submodule changes,
-and `input_size_dyn` is computed from the actual resulting column count.
+(data/datasets.py::CamelsH5) -- so the embedding is included with zero submodule changes.
+Because CamelsH5 reads and caches attributes once at construction, refreshing the
+embedding's VALUES between epochs requires reconstructing CamelsH5 each epoch (same
+column count throughout, so input_size_dyn and the model architecture never change
+mid-training -- only what the static features contain does).
 
 train_data.h5 note: this is a large preprocessing artifact the submodule's own training
 run builds once and is correctly gitignored -- it will NOT exist in a fresh submodule
@@ -35,11 +55,16 @@ whose shape depends on input_size_dyn; verified against Scripts/lstm.py -- weigh
 bias, and fc.weight/bias are all independent of it). This module filters the checkpoint
 by shape before loading, so everything except weight_ih warm-starts correctly.
 
-Status: reviewed for correctness against the submodule's actual code, and the shape-
-filtered checkpoint loading has been unit-tested against a real PyTorch model matching
-the submodule's parameter names/shapes. The full pipeline has NOT yet completed an
-end-to-end run against real CAMELS data in the environment this was developed in (no
-CAMELS data available there) -- expect to iterate on this against your real run.
+Performance note: reconstructing CamelsH5 every epoch re-reads the full h5 array into
+memory (data/datasets.py::CamelsH5._preload_data) -- bounded and fine for a handful of
+epochs, but scales linearly with n_epochs. For long fine-tuning runs, refreshing every
+epoch may need to become every N epochs instead; not implemented here.
+
+Status: reviewed against the submodule's actual code; shape-filtered checkpoint loading
+and the online violation-detection helper are unit-tested against synthetic
+data/models. The full iterative loop has NOT yet completed an end-to-end run against
+real CAMELS data in the environment this was developed in (no CAMELS data available
+there, no GPU/large-scale test) -- expect to iterate against your real run.
 """
 
 from __future__ import annotations
@@ -136,15 +161,36 @@ class EnhancedTrainingPipeline:
         device: str = "cpu",
     ) -> tuple[dict, Path]:
         """
-        Fine-tunes the submodule's pretrained Model for n_epochs using:
-          - curriculum-weighted sampling (WeightedRandomSampler) over training basin-days,
-            weighted by each basin's TOTAL violation count from the baseline audit,
-          - static features augmented with the 7-dim violation-history embedding (via the
-            attributes.db copy -- see module docstring),
-          - the submodule's own unmodified NSELoss.
+        Fine-tunes the submodule's pretrained Model for n_epochs, with the graph updated
+        DURING training, not just once beforehand:
 
-        Only meaningful when the run used `concat_static=True`; raises otherwise (see
-        message below).
+          epoch loop:
+            1. curriculum weights + violation-embedding attributes.db are rebuilt from the
+               graph's CURRENT state (baseline audit on epoch 1; refreshed by the previous
+               epoch's online detections from epoch 2 onward)
+            2. one epoch of training, with R0-R3 (the four rules that need only a single
+               timestep's qsim/qobs, no calendar-date window) evaluated directly on every
+               batch's own forward-pass output -- rescaled back to physical mm/day via the
+               submodule's own rescale_features, purely as a side channel with .detach(),
+               never fed into the loss or the backward pass
+            3. every detected violation is written to the SAME graph store immediately
+               (not batched to end-of-epoch), so it's visible to anything else watching the
+               graph while this epoch is still running
+            4. at epoch end, the graph now reflects this epoch's actual model behavior, and
+               the next epoch's curriculum weights + embeddings are recomputed from it
+
+        R4 (peak timing) and R5/R6 (annual mass balance, Budyko) are NOT evaluated inside
+        this loop -- they require a full water-year of calendar-dated observations, which
+        an isolated training sequence window doesn't carry. They remain evaluated only in
+        the coarser before/after audits (baseline pre-training, final audit post-training).
+        This is a real scope limit, not an oversight -- state it in the manuscript rather
+        than implying all 7 rules get real-time treatment.
+
+        The loss function itself is the submodule's own unmodified NSELoss throughout --
+        nothing about it changes epoch to epoch. Only (a) which basin-days get sampled and
+        (b) the static input's violation-embedding values change between epochs.
+
+        Only meaningful when the run used `concat_static=True`; raises otherwise.
 
         Returns (state_dict, augmented_db_path) -- pass augmented_db_path to
         generate_predictions() so evaluation uses the same static-attribute set training did.
@@ -159,19 +205,24 @@ class EnhancedTrainingPipeline:
 
         _ensure_submodule_on_path()
         import torch
-        from torch.utils.data import DataLoader, WeightedRandomSampler
+        from torch.utils.data import WeightedRandomSampler
 
         from data.datasets import CamelsH5  # noqa: E402 (submodule import)
+        from data.datautils import rescale_features  # noqa: E402
         from src.main import Model  # noqa: E402 (submodule import)
         from Scripts.nseloss import NSELoss  # noqa: E402
 
-        device_t = torch.device(device)
-        tqdm.write("[fine_tune] Step A: preparing embedding-augmented attributes.db")
-        augmented_db = self._augmented_db_path(basin_ids)
+        from hydrokg.rules.registry import DAILY_RULES, build_all_rules
+        daily_rules = {rid: rule for rid, rule in build_all_rules().items() if rid in DAILY_RULES}
 
+        device_t = torch.device(device)
         tqdm.write("[fine_tune] Step B: locating/rebuilding train_data.h5")
         train_h5 = self._ensure_train_h5(basin_ids)
 
+        # Static feature count is fixed once (adding embedding COLUMNS never changes their
+        # count epoch to epoch, only their VALUES do) so input_size_dyn never changes.
+        tqdm.write("[fine_tune] Step A: preparing embedding-augmented attributes.db (epoch 1)")
+        augmented_db = self._augmented_db_path(basin_ids)
         n_static = n_static_features(augmented_db, basin_ids)
         input_size_dyn = 5 + n_static
 
@@ -188,10 +239,6 @@ class EnhancedTrainingPipeline:
         weight_file = self.run_dir / "model_epoch5.pt"
         checkpoint_state = torch.load(weight_file, map_location=device_t)
         model_state = model.state_dict()
-
-        # strict=False only skips MISSING/UNEXPECTED keys, not shape-mismatched ones
-        # present in both dicts -- filter by shape explicitly. lstm.weight_ih is the only
-        # parameter whose shape depends on input_size_dyn (verified against Scripts/lstm.py).
         compatible = {k: v for k, v in checkpoint_state.items()
                       if k in model_state and model_state[k].shape == v.shape}
         skipped = sorted(set(checkpoint_state.keys()) - set(compatible.keys()))
@@ -202,46 +249,98 @@ class EnhancedTrainingPipeline:
             f"random-init: {skipped or 'none'}"
         )
 
-        tqdm.write("[fine_tune] Step D: loading training data + curriculum weights")
-        ds = CamelsH5(
-            h5_file=train_h5,
-            basins=basin_ids,
-            db_path=str(augmented_db),
-            concat_static=True,
-            cache=True,
-            no_static=False,
-        )
-
-        sampler_helper = self.build_curriculum_sampler()
-        basin_weights = sampler_helper.basin_weights(basin_ids)
-        per_sample_weights = np.array([basin_weights.get(b, sampler_helper.floor_weight)
-                                        for b in ds.sample_2_basin])
-        sampler = WeightedRandomSampler(per_sample_weights, num_samples=len(ds), replacement=True)
-        loader = DataLoader(ds, batch_size=self.run_cfg["batch_size"], sampler=sampler)
-
         optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
         loss_func = NSELoss()
+        batch_size = self.run_cfg["batch_size"]
 
-        tqdm.write(f"[fine_tune] Step E: training for {n_epochs} epoch(s)")
+        tqdm.write(f"[fine_tune] Step D-E: training for {n_epochs} epoch(s), graph refreshed between each")
         model.train()
         for epoch in range(1, n_epochs + 1):
+            if epoch > 1:
+                tqdm.write(f"[fine_tune] Refreshing attributes.db + curriculum weights from "
+                           f"epoch {epoch - 1}'s online detections")
+                augmented_db = self._augmented_db_path(basin_ids)  # same columns, refreshed values
+
+            # Rebuilt every epoch: CamelsH5 reads static attributes once at construction and
+            # caches them, so picking up this epoch's refreshed embedding values requires a
+            # fresh instance rather than mutating the existing one.
+            ds = CamelsH5(
+                h5_file=train_h5, basins=basin_ids, db_path=str(augmented_db),
+                concat_static=True, cache=True, no_static=False,
+            )
+            sampler_helper = self.build_curriculum_sampler()
+            basin_weights = sampler_helper.basin_weights(basin_ids)
+            per_sample_weights = np.array([basin_weights.get(b, sampler_helper.floor_weight)
+                                            for b in ds.sample_2_basin])
+            indices = list(WeightedRandomSampler(per_sample_weights, num_samples=len(ds), replacement=True))
+
             running_loss = 0.0
-            pbar = tqdm(loader, desc=f"epoch {epoch}/{n_epochs}", unit="batch", leave=False)
-            for i, data in enumerate(pbar, start=1):
+            n_batches = (len(indices) + batch_size - 1) // batch_size
+            pbar = tqdm(range(n_batches), desc=f"epoch {epoch}/{n_epochs}", unit="batch", leave=False)
+            epoch_violations = 0
+
+            for b in pbar:
+                batch_idx = indices[b * batch_size:(b + 1) * batch_size]
+                if not batch_idx:
+                    continue
+                samples = [ds[i] for i in batch_idx]
+                x = torch.stack([s[0] for s in samples]).to(device_t)
+                y = torch.stack([s[1] for s in samples]).to(device_t)
+                q_stds = torch.stack([s[2] for s in samples]).to(device_t)
+                batch_basins = [ds.sample_2_basin[i] for i in batch_idx]
+
                 optimizer.zero_grad()
-                x, y, q_stds = data
-                x, y, q_stds = x.to(device_t), y.to(device_t), q_stds.to(device_t)
                 predictions = model(x)[0]
-                loss = loss_func(predictions, y, q_stds)
+                loss = loss_func(predictions, y, q_stds)  # unmodified NSELoss, normalized space
                 loss.backward()
                 optimizer.step()
                 running_loss += loss.item()
-                pbar.set_postfix(mean_loss=f"{running_loss / i:.4f}")
-            tqdm.write(f"[fine_tune]   epoch {epoch}/{n_epochs} done, mean loss={running_loss / max(i, 1):.4f}")
+
+                # Side channel only, no gradient: rescale this batch's own forward-pass
+                # output back to physical mm/day and check R0-R3 directly against it --
+                # zero extra forward passes, genuinely concurrent with training.
+                with torch.no_grad():
+                    q_sim_phys = rescale_features(predictions.detach().cpu().numpy(), "output").flatten()
+                    q_obs_phys = rescale_features(y.detach().cpu().numpy(), "output").flatten()
+                violations = self._detect_online_violations(
+                    batch_basins, q_obs_phys, q_sim_phys, daily_rules
+                )
+                if violations:
+                    self.graph.write_violations(violations)
+                    epoch_violations += len(violations)
+
+                pbar.set_postfix(mean_loss=f"{running_loss / (b + 1):.4f}", violations=epoch_violations)
+
+            tqdm.write(
+                f"[fine_tune]   epoch {epoch}/{n_epochs} done: mean loss={running_loss / max(n_batches, 1):.4f}, "
+                f"{epoch_violations} online R0-R3 violations detected this epoch"
+            )
 
         state_dict_path = self.work_dir / "enhanced_model_state_dict.pt"
         torch.save(model.state_dict(), state_dict_path)
         return model.state_dict(), augmented_db
+
+    @staticmethod
+    def _detect_online_violations(batch_basins, q_obs_phys, q_sim_phys, daily_rules) -> list:
+        """Group one training batch's (basin, qobs, qsim) triples by basin and run R0-R3
+        against each basin's rows. Dates are synthetic (a plain daily range starting
+        2000-01-01, reset per basin per batch) since these rules don't use calendar
+        context -- only used so Rule.evaluate()'s pandas-datetime-indexed interface is
+        satisfied; never used for windowing, so their specific values don't matter."""
+        import pandas as pd
+
+        violations = []
+        batch_basins = np.array(batch_basins)
+        for basin_id in np.unique(batch_basins):
+            mask = batch_basins == basin_id
+            n = int(mask.sum())
+            df = pd.DataFrame(
+                {"qobs": q_obs_phys[mask], "qsim": q_sim_phys[mask]},
+                index=pd.date_range("2000-01-01", periods=n, freq="D"),
+            )
+            for rule in daily_rules.values():
+                violations.extend(rule.evaluate(str(basin_id), df))
+        return violations
 
     def generate_predictions(
         self,
