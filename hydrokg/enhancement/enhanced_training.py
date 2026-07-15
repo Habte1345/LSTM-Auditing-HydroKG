@@ -55,10 +55,17 @@ whose shape depends on input_size_dyn; verified against Scripts/lstm.py -- weigh
 bias, and fc.weight/bias are all independent of it). This module filters the checkpoint
 by shape before loading, so everything except weight_ih warm-starts correctly.
 
-Performance note: reconstructing CamelsH5 every epoch re-reads the full h5 array into
-memory (data/datasets.py::CamelsH5._preload_data) -- bounded and fine for a handful of
-epochs, but scales linearly with n_epochs. For long fine-tuning runs, refreshing every
-epoch may need to become every N epochs instead; not implemented here.
+Performance/memory note (real bug fixed here, not just a tuning caveat): an earlier
+version of this method reconstructed CamelsH5 fresh every epoch to pick up refreshed
+embedding values. CamelsH5 loads the full x/y arrays into memory at construction
+(~12 GiB for a 670-basin, 15-year run) -- reconstructing it meant the previous epoch's
+array and the new epoch's array were both alive in memory during the moment of
+reassignment, which produced a real ArrayMemoryError on a real run. Fixed by
+constructing CamelsH5 exactly ONCE for the whole fine-tuning call, and refreshing only
+the small static-attribute table between epochs via the same object's own
+_load_attributes() method (which never touches the large arrays) -- see the epoch loop
+below. This is also faster, not just safer: the large arrays are no longer silently
+re-read every epoch.
 
 Status: reviewed against the submodule's actual code; shape-filtered checkpoint loading
 and the online violation-detection helper are unit-tested against synthetic
@@ -253,21 +260,33 @@ class EnhancedTrainingPipeline:
         loss_func = NSELoss()
         batch_size = self.run_cfg["batch_size"]
 
-        tqdm.write(f"[fine_tune] Step D-E: training for {n_epochs} epoch(s), graph refreshed between each")
+        tqdm.write("[fine_tune] Step D: loading training data (once for the whole run)")
+        # CamelsH5 loads the full x/y arrays into memory here (~12 GiB for a 670-basin,
+        # 15-year run) -- this happens ONCE, not once per epoch. Only the static
+        # attributes (a few KB) get refreshed between epochs, via the same object's own
+        # _load_attributes() method below, never by reconstructing CamelsH5. Reconstructing
+        # it every epoch previously meant two ~12 GiB arrays (the old epoch's and the new
+        # epoch's) being alive simultaneously during the brief moment of reassignment,
+        # which is what caused the reported ArrayMemoryError -- and it also meant silently
+        # re-reading the identical, never-changing x/y arrays every epoch for nothing.
+        ds = CamelsH5(
+            h5_file=train_h5, basins=basin_ids, db_path=str(augmented_db),
+            concat_static=True, cache=True, no_static=False,
+        )
+
+        tqdm.write(f"[fine_tune] Step E: training for {n_epochs} epoch(s), graph refreshed between each")
         model.train()
         for epoch in range(1, n_epochs + 1):
             if epoch > 1:
                 tqdm.write(f"[fine_tune] Refreshing attributes.db + curriculum weights from "
                            f"epoch {epoch - 1}'s online detections")
                 augmented_db = self._augmented_db_path(basin_ids)  # same columns, refreshed values
+                # Re-run CamelsH5's own attribute-loading step against the refreshed db --
+                # this only touches ds.df/attribute_means/attribute_stds (tiny), never
+                # re-reads the large h5 arrays (ds.x/ds.y/ds.sample_2_basin untouched).
+                ds.db_path = str(augmented_db)
+                ds._load_attributes()
 
-            # Rebuilt every epoch: CamelsH5 reads static attributes once at construction and
-            # caches them, so picking up this epoch's refreshed embedding values requires a
-            # fresh instance rather than mutating the existing one.
-            ds = CamelsH5(
-                h5_file=train_h5, basins=basin_ids, db_path=str(augmented_db),
-                concat_static=True, cache=True, no_static=False,
-            )
             sampler_helper = self.build_curriculum_sampler()
             basin_weights = sampler_helper.basin_weights(basin_ids)
             per_sample_weights = np.array([basin_weights.get(b, sampler_helper.floor_weight)
