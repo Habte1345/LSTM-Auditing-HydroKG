@@ -5,13 +5,15 @@
 #SBATCH -N 1
 #SBATCH -c 8
 #SBATCH --mem=32G
-#SBATCH -t 16:00:00
+
+
+#SBATCH -t 20:00:00
 #SBATCH -o HydroKG_%j.out
 #SBATCH -e HydroKG_%j.err
 
-# UAHPC SLURM submission template for the full enhancement pipeline.
-# Submit with: sbatch scripts/run_enhancement_uahpc.slurm
-# Edit REPO_ROOT, CONDA_ENV, RUN_DIR, and CAMELS_ROOT for your setup first.
+# --n_workers 8: matches -c 8 above. Parallelizes per-basin prediction generation and
+# violation scanning (steps 3 and 4a) across that many workers within this one job --
+# no SLURM array needed. If you change -c, change --n_workers to match.
 
 set -eo pipefail   # stop on error; -u omitted since /etc/bashrc references unset vars
 
@@ -31,11 +33,7 @@ python scripts/run_enhanced_training.py \
   --camels_root "$CAMELS_ROOT" \
   --predictions_pickle "$RUN_DIR/lstm_seed658.p" \
   --n_epochs 3 \
+  --n_workers 8 \
+  --resume \
   --output_prefix results/hydrokg_run1
 
-# For GPU nodes instead, change the SBATCH directives above to:
-#   #SBATCH -p gpu
-#   #SBATCH --qos gpu
-#   #SBATCH --gres=gpu:1
-# and add --device cuda to the python command -- but confirm
-# `python -c "import torch; print(torch.cuda.is_available())"` prints True first.

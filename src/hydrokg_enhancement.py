@@ -462,13 +462,29 @@ class EnhancedTrainingPipeline:
         return violations
 
     def generate_predictions(self, state_dict: dict, augmented_db_path: str | Path,
-                              basin_ids: list[str], device: str = "cpu") -> dict[str, pd.DataFrame]:
+                              basin_ids: list[str], device: str = "cpu",
+                              n_workers: int = 1) -> dict[str, pd.DataFrame]:
         """Runs the fine-tuned model over the submodule's validation period
         (GLOBAL_SETTINGS val_start/val_end), mirroring its evaluate_basin() logic but
         against the fine-tuned weights and embedding-augmented attributes.db. Returns
-        {basin_id: DataFrame(qobs, qsim)}."""
+        {basin_id: DataFrame(qobs, qsim)}.
+
+        Parameters
+        ----------
+        n_workers : each basin's dataset build + forward pass is fully independent of
+            every other basin's (same read-only model, no shared mutable state), so this
+            loop was previously the largest avoidable source of wall-clock time in the
+            pipeline -- 670 basins run one at a time. n_workers > 1 processes basins
+            concurrently via a thread pool. Threads (not multiprocessing) are used
+            deliberately: the model and its weights stay in one process's memory with no
+            serialization needed, and PyTorch's CPU tensor ops + the per-basin text-file
+            I/O both release the GIL for meaningful portions of their work, so real
+            wall-clock speedup is expected even though Python threads don't give true
+            parallel CPU execution for pure-Python code.
+        """
         _ensure_submodule_on_path()
         import torch
+        from concurrent.futures import ThreadPoolExecutor, as_completed
         from torch.utils.data import DataLoader
 
         from data.datasets import CamelsH5, CamelsTXT  # noqa: E402
@@ -482,7 +498,7 @@ class EnhancedTrainingPipeline:
         model = Model(input_size_dyn=input_size_dyn, hidden_size=self.run_cfg["hidden_size"],
                        dropout=self.run_cfg["dropout"], concat_static=True, no_static=False).to(device_t)
         model.load_state_dict(state_dict)
-        model.eval()
+        model.eval()  # no dropout/BN state mutation -- safe to share across threads for read-only forward passes
 
         train_h5 = self._ensure_train_h5(basin_ids)
         ds_train = CamelsH5(h5_file=train_h5, db_path=str(augmented_db_path), basins=basin_ids, concat_static=True)
@@ -490,10 +506,8 @@ class EnhancedTrainingPipeline:
         stds = ds_train.get_attribute_stds()
 
         date_range = pd.date_range(start=GLOBAL_SETTINGS["val_start"], end=GLOBAL_SETTINGS["val_end"])
-        results: dict[str, pd.DataFrame] = {}
-        skipped_basins = []
 
-        for basin in tqdm(basin_ids, desc="generating predictions", unit="basin"):
+        def _predict_one_basin(basin: str):
             try:
                 ds_test = CamelsTXT(
                     camels_root=self.camels_root, basin=basin,
@@ -503,8 +517,7 @@ class EnhancedTrainingPipeline:
                     db_path=str(augmented_db_path),
                 )
             except Exception as exc:  # noqa: BLE001
-                skipped_basins.append((basin, str(exc)))
-                continue
+                return basin, None, str(exc)
 
             loader = DataLoader(ds_test, batch_size=1024, shuffle=False, num_workers=0)
             preds, obs = None, None
@@ -519,11 +532,34 @@ class EnhancedTrainingPipeline:
             preds_np = rescale_features(preds.numpy(), variable="output").flatten()
             obs_np = obs.numpy().flatten()
             n = min(len(preds_np), len(obs_np), len(date_range))
-            results[basin] = pd.DataFrame({"qobs": obs_np[:n], "qsim": preds_np[:n]}, index=date_range[:n])
+            df = pd.DataFrame({"qobs": obs_np[:n], "qsim": preds_np[:n]}, index=date_range[:n])
+            return basin, df, None
+
+        results: dict[str, pd.DataFrame] = {}
+        skipped_basins = []
+
+        if n_workers <= 1:
+            for basin in tqdm(basin_ids, desc="generating predictions", unit="basin"):
+                basin_id, df, err = _predict_one_basin(basin)
+                if err is not None:
+                    skipped_basins.append((basin_id, err))
+                else:
+                    results[basin_id] = df
+        else:
+            with ThreadPoolExecutor(max_workers=n_workers) as pool:
+                futures = {pool.submit(_predict_one_basin, b): b for b in basin_ids}
+                for future in tqdm(as_completed(futures), total=len(futures),
+                                   desc=f"generating predictions ({n_workers} workers)", unit="basin"):
+                    basin_id, df, err = future.result()
+                    if err is not None:
+                        skipped_basins.append((basin_id, err))
+                    else:
+                        results[basin_id] = df
 
         if skipped_basins:
             tqdm.write(f"[generate_predictions] skipped {len(skipped_basins)} basin(s), e.g.: {skipped_basins[:3]}")
         return results
+
 
     def apply_analogy_correction(self, raw_predictions: dict[str, pd.DataFrame],
                                   violation_by_basin: dict[str, list[tuple[str, str]]],
