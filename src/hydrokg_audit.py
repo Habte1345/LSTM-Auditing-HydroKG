@@ -1,7 +1,7 @@
 """
 Offline post-processing audit: applies R0-R6 to a completed LSTM's predictions and
-computes the Eq. 3 violation burden. Merged from 3 files (offline_auditor.py,
-violation_burden.py, plus the now-removed realtime_auditor.py).
+computes the Eq. 3 (In the paper) violation burden. Merged from 3 files (offline_auditor.py,
+violation_burden.py).
 
 Note on real-time detection: the actual "real-time" mechanism used by the real study
 lives in hydrokg/enhanced_training.py (fine_tune()'s online R0-R3 detection against

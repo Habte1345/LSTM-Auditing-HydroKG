@@ -1,5 +1,5 @@
 """
-Real-data loading for R5/R6 and stratification: precipitation from CAMELS forcing,
+Data loading for R5/R6 and stratification: precipitation from CAMELS forcing,
 ET as a long-term water-balance residual (for reporting only, not fed into R5/R6
 directly -- see below), and aridity/land-cover stratification classes. Merged from
 3 files; the synthetic-data generator that used to live alongside these has been

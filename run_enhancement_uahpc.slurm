@@ -18,7 +18,7 @@ set -eo pipefail   # stop on error; -u omitted since /etc/bashrc references unse
 REPO_ROOT=/bighome/hdagne1/LSTM-Auditing-HydroKG
 CONDA_ENV=BUDYKO-dev
 RUN_DIR=external/HydroAuditToolFrameowrk/runs/run_0305_2015_seed658666
-CAMELS_ROOT="$REPO_ROOT/external/HydroAuditToolFrameowrk/data/CAMELS_US"
+CAMELS_ROOT="$REPO_ROOT/data/CAMELS_US"
 
 cd "$REPO_ROOT"
 source ~/.bashrc
