@@ -159,6 +159,14 @@ class InMemoryGraphStore(GraphStore):
         self._catchments: dict[str, dict] = {}
         self._analogy_edges: dict[str, list[tuple[str, float]]] = {}
         self._basin_metrics: dict[str, dict] = {}
+        # Cache of the full (basin_id, rule_id) -> count aggregation. Rebuilt lazily
+        # (only on the next read after a write) rather than recomputed on every single
+        # get_violation_counts()/query_analog_basins() call. Without this, a correction
+        # pass that queries analog basins once per flagged violation re-groups the ENTIRE
+        # violations table (potentially millions of rows after several fine-tuning
+        # epochs' worth of online detections) once per candidate basin per flagged
+        # violation -- a real, measured performance bug, not a hypothetical one.
+        self._counts_cache: pd.DataFrame | None = None
 
     def initialize_schema(self) -> None:
         return None
@@ -184,6 +192,7 @@ class InMemoryGraphStore(GraphStore):
             self._violations = new_df
         else:
             self._violations = pd.concat([self._violations, new_df], ignore_index=True)
+        self._counts_cache = None  # invalidate -- next read rebuilds it once, lazily
         return len(rows)
 
     def set_basin_metrics(self, basin_id: str, kge: Optional[float] = None,
@@ -197,13 +206,28 @@ class InMemoryGraphStore(GraphStore):
     def upsert_analogy_edges(self, basin_id: str, analogs: list[tuple[str, float]]) -> None:
         self._analogy_edges[basin_id] = sorted(analogs, key=lambda x: -x[1])
 
+    def _ensure_counts_cache(self) -> pd.DataFrame:
+        """Rebuild the (basin_id, rule_id) -> count aggregation only when the underlying
+        violations table has actually changed since the last read. This is what turns
+        get_violation_counts/query_analog_basins from an O(total violations) full-table
+        scan on every single call into an O(1) cache hit after the first call following
+        any write -- the difference between fine on a demo and unusable at ~9M rows
+        after a few real fine-tuning epochs."""
+        if self._counts_cache is None:
+            if self._violations.empty:
+                self._counts_cache = pd.DataFrame(columns=["basin_id", "rule_id", "count"])
+            else:
+                self._counts_cache = (
+                    self._violations.groupby(["basin_id", "rule_id"], observed=True)
+                    .size().reset_index(name="count")
+                )
+        return self._counts_cache
+
     def get_violation_counts(self, basin_id: Optional[str] = None) -> pd.DataFrame:
-        df = self._violations
+        cache = self._ensure_counts_cache()
         if basin_id is not None:
-            df = df[df["basin_id"] == basin_id]
-        if df.empty:
-            return pd.DataFrame(columns=["basin_id", "rule_id", "count"])
-        return df.groupby(["basin_id", "rule_id"], observed=True).size().reset_index(name="count")
+            return cache[cache["basin_id"] == basin_id].reset_index(drop=True)
+        return cache
 
     def get_basin_violation_profile(self, basin_id: str) -> dict:
         counts = self.get_violation_counts(basin_id)
@@ -215,15 +239,19 @@ class InMemoryGraphStore(GraphStore):
         return profile
 
     def query_violation_hotspots(self, top_n: int = 50) -> pd.DataFrame:
-        df = self._violations
-        if df.empty:
+        cache = self._ensure_counts_cache()
+        if cache.empty:
             return pd.DataFrame(columns=["basin_id", "rule_id", "count", "weight"])
-        agg = (df.groupby(["basin_id", "rule_id"], observed=True).size()
-               .reset_index(name="count").sort_values("count", ascending=False))
+        agg = cache.sort_values("count", ascending=False).copy()
         agg["weight"] = agg["count"] / agg["count"].sum()
         return agg.head(top_n).reset_index(drop=True)
 
     def query_analog_basins(self, basin_id, rule_id, aridity_class, landcover_class, top_k=5):
+        # One dict build from the small cached aggregate (at most n_basins x 7 rows),
+        # not one full-table groupby per candidate basin per call.
+        cache = self._ensure_counts_cache()
+        rule_counts = cache[cache["rule_id"] == rule_id].set_index("basin_id")["count"]
+
         candidates = []
         for other_id, meta in self._catchments.items():
             if other_id == basin_id:
@@ -232,11 +260,7 @@ class InMemoryGraphStore(GraphStore):
                             + (meta.get("landcover_class") == landcover_class))
             if class_match == 0:
                 continue
-            other_counts = self.get_violation_counts(other_id)
-            rule_count = 0
-            if not other_counts.empty:
-                match = other_counts[other_counts["rule_id"] == rule_id]
-                rule_count = int(match["count"].sum()) if not match.empty else 0
+            rule_count = int(rule_counts.get(other_id, 0))
             score = class_match - np.log1p(rule_count)
             candidates.append((other_id, score))
         candidates.sort(key=lambda x: -x[1])
