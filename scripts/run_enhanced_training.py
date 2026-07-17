@@ -188,7 +188,9 @@ def run_real(args):
                     violation_by_basin[basin_id] = violations
 
         corrected = pipeline.apply_analogy_correction(raw_enhanced, violation_by_basin, stratification)
-        pipeline.save_predictions_pickle(corrected, filename=Path(enhanced_pred_pickle).name)
+        with open(enhanced_pred_pickle, "wb") as fp:
+            pickle.dump(corrected, fp)
+        tqdm.write(f"  saved enhanced predictions to {enhanced_pred_pickle}")
 
     # --- 5. Final audit of the corrected enhanced predictions ---
     step(5, 5, "Final audit of the corrected enhanced predictions")
