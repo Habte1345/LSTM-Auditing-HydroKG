@@ -369,13 +369,46 @@ class EnhancedTrainingPipeline:
         weight_file = self.run_dir / "model_epoch5.pt"
         checkpoint_state = torch.load(weight_file, map_location=device_t)
         model_state = model.state_dict()
+
         compatible = {k: v for k, v in checkpoint_state.items()
                       if k in model_state and model_state[k].shape == v.shape}
-        skipped = sorted(set(checkpoint_state.keys()) - set(compatible.keys()))
+        mismatched = sorted(set(checkpoint_state.keys()) - set(compatible.keys()))
         model_state.update(compatible)
+
+        # Critical fix: lstm.weight_ih has shape (input_size, 4*hidden) -- input_size is
+        # dim 0 (verified against Scripts/lstm.py). When the violation embedding adds 7
+        # new input columns, the OLD code discarded this entire matrix and left it at
+        # Model's random initialization -- scrambling the mapping for the original 32
+        # (or 5) input columns too, not just the 7 new ones. That forces fine-tuning to
+        # relearn the whole input mapping from scratch, not just how to use 7 new
+        # features -- almost certainly why a 3-epoch run showed a large mean KGE drop.
+        #
+        # Fixed here: copy the pretrained weight_ih's rows into the corresponding
+        # original-input rows of the new (larger) weight_ih, and zero-init (not
+        # randomly reinit) only the new rows. Zero means the new features contribute
+        # NOTHING to the LSTM gates at epoch 0 -- the model starts fine-tuning
+        # BEHAVIORALLY IDENTICAL to the original checkpoint, and only has to learn
+        # whether/how to use the new signal, a far easier problem than relearning
+        # everything. This should sharply reduce how many epochs are needed to reach
+        # (or beat) the original model's skill, not just how fast each epoch runs.
+        for key in mismatched:
+            if key == "lstm.weight_ih":
+                old_w = checkpoint_state[key]          # (old_input_size, 4*hidden)
+                new_w = model_state[key].clone()        # (new_input_size, 4*hidden), random init
+                old_input_size = old_w.shape[0]
+                new_w.zero_()                           # new columns' effective contribution = 0
+                new_w[:old_input_size, :] = old_w       # exact pretrained weights for original inputs
+                model_state[key] = new_w
+                tqdm.write(f"[fine_tune]   lstm.weight_ih: preserved pretrained weights for "
+                           f"{old_input_size} original input dims, zero-initialized "
+                           f"{new_w.shape[0] - old_input_size} new (violation-embedding) dims")
+                mismatched.remove(key)
+                break
+
         model.load_state_dict(model_state)
-        tqdm.write(f"[fine_tune]   warm-started {len(compatible)}/{len(checkpoint_state)} parameters; "
-                   f"random-init: {skipped or 'none'}")
+        tqdm.write(f"[fine_tune]   warm-start: {len(compatible)} parameters copied exactly, "
+                   f"lstm.weight_ih partially preserved (see above), "
+                   f"fully random-init: {mismatched or 'none'}")
 
         optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
         loss_func = NSELoss()
