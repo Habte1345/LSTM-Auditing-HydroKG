@@ -104,9 +104,36 @@ def compute_deltas(baseline: pd.DataFrame, enhanced: pd.DataFrame) -> pd.DataFra
         (typically OfflineAuditor.audit_all() output run on the traditional LSTM and on
         the HydroKG-enhanced LSTM respectively).
     """
-    base = baseline.set_index("basin_id")[["kge", "violation_burden"]]
-    enh = enhanced.set_index("basin_id")[["kge", "violation_burden"]]
+    # basin_id is forced to string on both sides before joining. USGS gauge IDs are
+    # zero-padded (e.g. "01013500"); if either DataFrame came from a CSV round-trip,
+    # pandas may have inferred an int64 column and silently dropped the leading zero,
+    # which makes every single basin fail to match the other side -- this happened on
+    # a real run and produced n_basins=0 / all-NaN results with no error at all.
+    base = baseline.copy()
+    enh = enhanced.copy()
+    base["basin_id"] = base["basin_id"].astype(str).str.zfill(8)
+    enh["basin_id"] = enh["basin_id"].astype(str).str.zfill(8)
+
+    base = base.set_index("basin_id")[["kge", "violation_burden"]]
+    enh = enh.set_index("basin_id")[["kge", "violation_burden"]]
     joined = base.join(enh, lsuffix="_lstm", rsuffix="_hydrokg", how="inner")
+
+    if len(joined) == 0:
+        raise ValueError(
+            f"compute_deltas matched 0 basins between baseline ({len(base)} rows) and "
+            f"enhanced ({len(enh)} rows) after normalizing basin_id to zero-padded "
+            f"strings. This means the two DataFrames' basin IDs don't overlap at all -- "
+            f"check that both actually cover the same basin set, not a zero-padding "
+            f"mismatch (which this function already guards against)."
+        )
+    if len(joined) < min(len(base), len(enh)) * 0.5:
+        import warnings
+        warnings.warn(
+            f"compute_deltas matched only {len(joined)} basins, well below "
+            f"baseline's {len(base)} / enhanced's {len(enh)} -- verify both cover the "
+            f"basin set you expect before trusting these deltas.", stacklevel=2,
+        )
+
     joined["delta_kge"] = joined["kge_hydrokg"] - joined["kge_lstm"]
     joined["delta_violation_burden"] = joined["violation_burden_lstm"] - joined["violation_burden_hydrokg"]
     return joined

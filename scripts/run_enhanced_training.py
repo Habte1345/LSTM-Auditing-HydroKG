@@ -96,7 +96,7 @@ def run_real(args):
     step(1, 5, "Baseline audit of the traditional LSTM's predictions")
     if args.resume and Path(baseline_csv).exists():
         tqdm.write(f"  --resume: found {baseline_csv}, loading instead of re-auditing")
-        baseline_results = pd.read_csv(baseline_csv)
+        baseline_results = pd.read_csv(baseline_csv, dtype={"basin_id": str})
         basin_ids = baseline_results["basin_id"].astype(str).tolist()
         stratification = (
             load_basin_stratification(args.stratification_db, basin_ids)
