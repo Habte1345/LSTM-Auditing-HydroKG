@@ -35,5 +35,5 @@ python scripts/run_enhanced_training.py \
   --n_epochs 3 \
   --n_workers 8 \
   --resume \
-  --output_prefix results/hydrokg_run1
+  --output_prefix results/hydrokg_run2
 
