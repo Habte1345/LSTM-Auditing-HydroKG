@@ -22,6 +22,17 @@ plt.rcParams.update({
     "axes.linewidth": 0.9,
     "savefig.dpi": 600,
 })
+import sys
+from pathlib import Path
+
+repo_root = Path("/bighome/hdagne1/LSTM-Auditing-HydroKG")
+sys.path.insert(0, str(repo_root))            # lets "from src.hydrokg_rules import ..." work
+sys.path.insert(0, str(repo_root / "src"))    # lets hydrokg_rules.py's OWN internal
+                                               # "from hydrokg_graph import ..." resolve
+
+script_path = r"/bighome/hdagne1/LSTM-Auditing-HydroKG/figures/Figure_1_plot.py"
+with open(script_path, encoding="utf-8") as file:
+    exec(file.read(), globals())
 
 # =========================================================
 # INPUTS YOU ALREADY HAVE

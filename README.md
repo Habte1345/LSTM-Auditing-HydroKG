@@ -2,123 +2,132 @@
 
 **Auditing and Improving LSTM Streamflow Predictions with Hydrologic Knowledge Graphs**
 
-HydroKG is a knowledge-graph-based auditing and enhancement framework for data-driven
-(LSTM) streamflow models. It targets the **skill-trust gap**: an LSTM can score well on
-KGE/NSE while still violating basic hydrologic physics (negative flow, broken water
-balance, mistimed peaks, Budyko inconsistency), and standard skill metrics do not surface
-this.
+HydroKG is a hydrology-specific knowledge graph framework that audits Long Short-Term
+Memory (LSTM) streamflow predictions against seven physically interpretable rules and
+uses detected violations to guide model enhancement. It addresses the skill-trust gap in
+data-driven streamflow prediction: an LSTM can achieve high Kling-Gupta Efficiency (KGE)
+while still violating basic hydrologic expectations, such as negative discharge, mistimed
+peaks, or water-balance and Budyko inconsistency. Applied to 670 CAMELS basins, many
+basins with moderate-to-high KGE were found to exhibit substantial rule violations, with
+violation type and severity varying systematically with aridity and land cover.
 
-HydroKG operationalizes seven physically interpretable rules (R0-R6) as a queryable
-knowledge graph over predictions, observations, basin attributes, and time context, and
-uses the graph itself — not a differentiable physics-informed loss term — as the
-mechanism for model enhancement. This is the central methodological distinction from
-physics-informed neural network (PINN) approaches: HydroKG does not add a hydrologic
-penalty to the loss function. Physics-informed losses for hydrology already exist and are
-computationally expensive to backpropagate through routing/storage terms. Instead, HydroKG
-treats rule violations as **structured, queryable relational information** and uses that
-structure for:
+HydroKG represents predictions, observations, basin attributes, and detected violations as
+connected facts in a knowledge graph, implemented in the Resource Description Framework
+(RDF), rather than as a modified loss function. Rule violations inform training through
+three non-differentiable, graph-guided mechanisms:
 
-1. **Query-driven curriculum reweighting** — the graph is queried after each
-   epoch/streaming window for violation clusters (by basin, rule, aridity class, land-cover
-   class), and that query result determines training-sample weighting in the next pass.
-2. **Graph-analogy correction at inference** — when a rule fires for basin *b* at time
-   *t*, the graph is traversed to structurally similar, low-violation basins, and their
-   behavior under comparable conditions informs a graph-derived correction, rather than a
-   fixed physical clip.
-3. **Violation-history embeddings** — each basin accumulates a violation profile vector
-   from the graph, usable as an auxiliary feature for a fine-tuning pass.
+1. **Curriculum reweighting** — each basin's cumulative violation count sets its sampling
+   weight for the following training epoch, recomputed from the graph's current state
+   after every epoch.
+2. **Violation-history embedding** — each basin's complete seven-rule violation profile is
+   added as a static input feature, giving the model direct access to its own violation
+   history.
+3. **Graph-analogy correction** — after training, flagged predictions are corrected once
+   using structurally similar, low-violation basins.
 
-## Repository status
+None of these mechanisms modify the loss function; the model trains throughout on the
+unmodified basin-normalized NSE loss.
 
-**Alpha.** This repository implements the full architecture end-to-end against synthetic
-data and an in-memory graph substitute (see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
-for why). The production path targets a real Neo4j instance (via `docker-compose.yml`) and
-the pretrained LSTM in the
-[`HydroAuditToolFrameowrk`](https://github.com/Habte1345/HydroAuditToolFrameowrk) submodule
-run against CAMELS. Nothing here has been validated on a live 670-basin CAMELS run yet —
-that is the next step once you have CAMELS data and a running Neo4j instance available.
+**Scope of real-time detection.** Only four of the seven rules (R0-R3) can be evaluated
+during training, since they require only the current simulated and observed discharge.
+The remaining three rules (R4-R6) require an event window or a full annual cycle
+unavailable within a single training batch, and are evaluated only through offline
+auditing, before and after training. See `docs/ARCHITECTURE.md` for the full description
+of both operating modes.
 
-## Why this is novel
-
-No prior work applies knowledge-graph auditing to post-hoc or online evaluation of
-hydrologic deep learning models. Existing physics-informed ML approaches for streamflow
-encode physical constraints as differentiable loss terms (PINN-style). HydroKG instead
-encodes physical rules as a **relational, queryable structure** that supports both
-diagnostic auditing (offline mode) and non-differentiable, retrieval-based model
-improvement (online mode) — treating the rule-violation graph as an active reasoning layer
-rather than a loss regularizer.
-
-## Two operating modes
-
-| Mode | When it runs | What it does |
-|---|---|---|
-| **Offline audit** | After a completed LSTM training/evaluation run | Applies R0-R6 to the full prediction set, computes per-basin violation burden (Eq. 3), and compares it against KGE to quantify the skill-trust relationship |
-| **Real-time audit** | Embedded into the training/inference loop | Evaluates rules in stages as their temporal context becomes available (R0-R3 per timestep, R4 per event window, R5-R6 per annual window), feeds violations into the graph continuously, and drives the three enhancement mechanisms above |
-
-## Architecture at a glance
+## Repository layout
 
 ```
-external/HydroAuditToolFrameowrk/   <- git submodule, UNTOUCHED (Kratzert et al. LSTM)
-hydrokg/
-  ontology/     RDF/OWL schema (Turtle) defining the graph's entities & relationships
-  graph/        GraphStore interface + Neo4j backend + in-memory dev/test backend
-  adapters/     Wraps the submodule's CLI/outputs without modifying it
-  data/         Precipitation loading (CAMELS forcing) + ET-as-residual computation
-  rules/        R0-R6, each a standalone, testable rule module
-  audit/        Offline post-processing auditor + real-time staged auditor
-  enhancement/  Curriculum reweighting, graph-analogy correction, violation embeddings
-  evaluation/   Skill-trust analysis (Eq. 3) and enhancement metrics (Eq. 4-6)
-  viz/          Publication-quality figures
-  cli/          Entry points (`hydrokg-audit`, `hydrokg-enhance`, ...)
+LSTM-Auditing-HydroKG/
+├── src/
+│   ├── hydrokg_rules.py         Seven auditing rules (R0-R6) and rule registry
+│   ├── hydrokg_graph.py         GraphStore interface, in-memory and Neo4j backends
+│   ├── hydrokg_audit.py         Offline auditor and violation-burden computation (Eq. 3)
+│   ├── hydrokg_data.py          Forcing data loading and aridity/land-cover stratification
+│   ├── hydrokg_adapters.py      Interface to the baseline LSTM submodule
+│   ├── hydrokg_enhancement.py   Enhancement mechanisms and fine-tuning pipeline
+│   ├── hydrokg_evaluation.py    KGE, skill-trust analysis, enhancement metrics (Eq. 4-6)
+│   ├── hydrokg_viz.py           Figure generation
+│   └── hydrokg_ontology.ttl     RDF/OWL schema
+├── scripts/
+│   ├── run_offline_audit.py         Offline audit of a completed LSTM run
+│   ├── run_enhanced_training.py     Full enhancement pipeline
+│   ├── init_neo4j_schema.cypher     Standalone Neo4j schema initialization
+│   └── run_enhancement_uahpc.slurm  SLURM submission template
+├── external/HydroAuditToolFrameowrk/  Baseline LSTM implementation (git submodule)
+├── data/                    CAMELS_US dataset location (not tracked)
+├── results/                 Pipeline output (not tracked)
+├── figures/                 Generated figures
+├── notebook/                Results analysis notebook
+├── docs/                    Architecture, ontology, rule specification, and methodology
+├── configs/, docker-compose.yml
+└── requirements.txt, requirements-torch.txt, requirements-neo4j.txt
 ```
 
-See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), [`docs/ONTOLOGY.md`](docs/ONTOLOGY.md),
-[`docs/RULES.md`](docs/RULES.md), and [`docs/METHODOLOGY.md`](docs/METHODOLOGY.md) for full
-detail, including the specific places where the manuscript draft's rule definitions were
-ambiguous or numerically underspecified and what this implementation assumes instead (flagged
-explicitly rather than silently resolved).
+`scripts/*.py` add the sibling `src/` directory to `sys.path` directly; no package
+installation is required beyond the dependencies listed in `requirements*.txt`.
 
 ## Installation
 
 ```bash
-git clone --recurse-submodules https://github.com/<your-username>/LSTM-Auditing-HydroKG.git
+git clone --recurse-submodules https://github.com/Habte1345/LSTM-Auditing-HydroKG.git
 cd LSTM-Auditing-HydroKG
-pip install -e .
-docker compose up -d neo4j   # production graph backend; optional for dev (in-memory works without it)
+pip install -r requirements-torch.txt
+docker compose up -d neo4j   # optional; the in-memory backend requires no server
 ```
 
-If you already cloned without `--recurse-submodules`:
+If the repository was cloned without `--recurse-submodules`:
 
 ```bash
 git submodule update --init --recursive
 ```
 
-## Quick start (synthetic data, no Neo4j, no CAMELS needed)
+## Usage
+
+**1. Audit a completed LSTM run:**
 
 ```bash
-python -m hydrokg.cli.run_offline_audit --demo
-```
-
-This runs the full offline audit pipeline against synthetic basin predictions using the
-in-memory graph backend, and prints/plots the skill-trust relationship. See
-[`notebooks/demo_end_to_end.ipynb`](notebooks/demo_end_to_end.ipynb) for a walkthrough of
-every stage, offline and real-time, both enhancement paths, and the resulting figures.
-
-## Real usage against your CAMELS run
-
-```bash
-python -m hydrokg.cli.run_offline_audit \
-  --config configs/default_config.yaml \
-  --camels_root /path/to/CAMELS_US \
+python scripts/run_offline_audit.py \
   --predictions_pickle external/HydroAuditToolFrameowrk/runs/<run_dir>/lstm_seed<seed>.p \
-  --graph_backend neo4j
+  --camels_root data/CAMELS_US \
+  --stratification_db external/HydroAuditToolFrameowrk/runs/<run_dir>/attributes.db \
+  --output_csv results/baseline_results.csv
 ```
+
+**2. Run the full enhancement pipeline** (baseline audit, real-time fine-tuning,
+prediction regeneration, graph-analogy correction, final audit):
+
+```bash
+python scripts/run_enhanced_training.py \
+  --run_dir external/HydroAuditToolFrameowrk/runs/<run_dir> \
+  --camels_root data/CAMELS_US \
+  --predictions_pickle external/HydroAuditToolFrameowrk/runs/<run_dir>/lstm_seed<seed>.p \
+  --n_epochs 3 \
+  --output_prefix results/hydrokg_run1
+```
+
+**3. Analyze results:** open `notebook/notebook.ipynb`, point it at the resulting
+`results/hydrokg_run1_*` files, and generate the skill-trust and enhancement figures.
+
+**HPC (SLURM):** `sbatch scripts/run_enhancement_uahpc.slurm`, after editing the paths at
+the top of the file for the target system.
 
 ## Citation
 
-If you use this framework, please cite the associated manuscript (in preparation):
-*Auditing and Improving LSTM Streamflow Predictions with Hydrologic Knowledge Graphs*,
-Dagne, H. and Mekonnen, M. (University of Alabama, Water Footprint Lab).
+If you use this framework, please cite:
+
+Tamiru, H., Wood, A. J., Akinade, B., Gong, J., Li, S., Guo, X., Loof, T., Holcomb, H.,
+Davies, A., & Burian, S. J. (2026). *Auditing and Improving LSTM Streamflow Predictions
+with Hydrologic Knowledge Graphs.* Geophysical Research Letters.
+
+Code archive: https://doi.org/10.5281/zenodo.21707541
+
+## Acknowledgment
+
+This research was supported by the Cooperative Institute for Research to Operations in
+Hydrology (CIROH) under award NA22NWS4320003 from the NOAA Cooperative Institute Program.
+The statements, findings, conclusions, and recommendations are those of the authors and do
+not necessarily reflect the opinions of NOAA.
 
 ## License
 

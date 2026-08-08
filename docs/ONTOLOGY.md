@@ -1,42 +1,39 @@
 # HydroKG Ontology
 
-Canonical schema: [`hydrokg/ontology/hydrokg_ontology.ttl`](../hydrokg/ontology/hydrokg_ontology.ttl)
-(OWL/RDF, Turtle syntax). This document is a readable companion to that file and maps each
-ontology term to its concrete implementation in both graph backends.
+Canonical schema: [`src/hydrokg_ontology.ttl`](../src/hydrokg_ontology.ttl) (OWL/RDF,
+Turtle syntax). This document is a readable companion to that file, mapping each ontology
+term to its implementation in both graph backends.
 
-## Classes → Neo4j node labels
+## Classes and Neo4j node labels
 
-| Ontology class | Neo4j label | Materialized for every... | Notes |
+| Ontology class | Neo4j label | Materialized for | Notes |
 |---|---|---|---|
-| `hkg:Catchment` | `Catchment` | basin in the study | unique on `basin_id` |
-| `hkg:Rule` | `Rule` | one of R0-R6 | fixed vocabulary, created once at `initialize_schema()` |
-| `hkg:ViolationClass` | `ViolationClass` | one of the 4 failure classes | fixed vocabulary |
-| `hkg:Violation` | `Violation` | **detected violation only** | not created for non-violating timesteps, see `docs/ARCHITECTURE.md` |
-| `hkg:AridityClass` | `AridityClass` | distinct aridity stratum observed | derived from CAMELS `aridity` attribute |
-| `hkg:LandCoverClass` | `LandCoverClass` | distinct land-cover stratum observed | derived from CAMELS `dom_land_cover` |
-| `hkg:TimeStep`, `hkg:EventWindow`, `hkg:AnnualWindow` | *(properties on Violation, not separate nodes)* | — | see "implementation note" below |
+| `hkg:Catchment` | `Catchment` | every basin in the study | unique on `basin_id` |
+| `hkg:Rule` | `Rule` | one of R0-R6 | fixed vocabulary, created at `initialize_schema()` |
+| `hkg:ViolationClass` | `ViolationClass` | one of four failure classes | fixed vocabulary |
+| `hkg:Violation` | `Violation` | each detected violation | not created for non-violating timesteps; see "Graph granularity" in `docs/ARCHITECTURE.md` |
+| `hkg:AridityClass` | `AridityClass` | each aridity stratum observed | derived from the CAMELS `aridity` attribute |
+| `hkg:LandCoverClass` | `LandCoverClass` | each land-cover stratum observed | derived from the CAMELS `dom_land_cover` attribute |
+| `hkg:TimeStep`, `hkg:EventWindow`, `hkg:AnnualWindow` | properties on `Violation`, not separate nodes | — | see note below |
 
-### Implementation note: TimeStep/EventWindow/AnnualWindow are properties, not nodes
+### TimeStep, EventWindow, and AnnualWindow are properties, not nodes
 
-The ontology declares `TimeStep`, `EventWindow`, and `AnnualWindow` as classes for
-conceptual completeness (a `Violation` "has a TimeStep", "is within an AnnualWindow"), but
-both `GraphStore` implementations store these as **properties on the `Violation` node**
-(`timestamp`, `event_window`, `annual_window` strings) rather than as separate graph nodes
-connected by edges. Materializing a `TimeStep` node for every one of ~11,000 calendar days
-across the study period would add graph traversal overhead for zero query benefit here —
-every query that needs "violations on this date" or "violations in this water year" can
-filter directly on the `Violation` node's property. If a future use case needs to *reason
-across* timesteps as first-class entities (e.g. "which other basins had a violation on
-the exact same day"), promote these to real nodes at that point; the ontology already
-supports it without a schema change.
+The ontology defines `TimeStep`, `EventWindow`, and `AnnualWindow` as classes, but both
+`GraphStore` implementations store this information as properties on the `Violation` node
+(`timestamp`, `event_window`, `annual_window`) rather than as separate connected nodes.
+Every query used in this study, including violations on a given date or within a given
+water year, filters directly on these `Violation` properties. Promoting these to separate
+nodes would be necessary only for queries that reason across timesteps as first-class
+entities (for example, identifying other basins with a violation on the same date), which
+the ontology supports without requiring a schema change.
 
-## Object properties → Neo4j relationship types
+## Object properties and Neo4j relationship types
 
 | Ontology property | Neo4j relationship | Direction |
 |---|---|---|
 | `hkg:forCatchment` | `FOR_CATCHMENT` | `(Violation)-[:FOR_CATCHMENT]->(Catchment)` |
 | `hkg:hasRule` | `HAS_RULE` | `(Violation)-[:HAS_RULE]->(Rule)` |
-| `hkg:violatesRule` | `VIOLATES_RULE` | `(Catchment)-[:VIOLATES_RULE]->(Rule)` — a fast-traversal shortcut alongside the full `Violation` node, used by `query_analog_basins` |
+| `hkg:violatesRule` | `VIOLATES_RULE` | `(Catchment)-[:VIOLATES_RULE]->(Rule)`, a direct shortcut used by `query_analog_basins` alongside the full `Violation` record |
 | `hkg:hasViolationClass` | `HAS_VIOLATION_CLASS` | `(Rule)-[:HAS_VIOLATION_CLASS]->(ViolationClass)` |
 | `hkg:hasAridityClass` | `HAS_ARIDITY_CLASS` | `(Catchment)-[:HAS_ARIDITY_CLASS]->(AridityClass)` |
 | `hkg:hasLandCoverClass` | `HAS_LANDCOVER_CLASS` | `(Catchment)-[:HAS_LANDCOVER_CLASS]->(LandCoverClass)` |
@@ -45,18 +42,18 @@ supports it without a schema change.
 ## Fixed rule vocabulary
 
 Seven `Rule` nodes and four `ViolationClass` nodes are created once, at
-`GraphStore.initialize_schema()` — see `hydrokg/graph/schema.py::RULE_METADATA` (the
-Python source of truth, checked against the `.ttl` file by
-`tests/test_ontology_sync.py`) and `scripts/init_neo4j_schema.cypher` (a standalone Cypher
-version for manual inspection independent of the Python driver).
+`GraphStore.initialize_schema()`. The Python source of truth is
+`src/hydrokg_graph.py::RULE_METADATA`; `scripts/init_neo4j_schema.cypher` provides a
+standalone Cypher version for manual inspection independent of the Python driver.
 
 ## Extending the ontology
 
-If you add an eighth rule or a new stratification dimension:
+To add an additional rule or stratification dimension:
 
-1. Add it to `hydrokg/ontology/hydrokg_ontology.ttl` first (source of truth).
-2. Add the matching entry to `hydrokg/graph/schema.py::RULE_METADATA` (or a new constants
-   block for a new stratification dimension).
-3. Add a new `Rule` subclass in `hydrokg/rules/` and register it in
-   `hydrokg/rules/registry.py::RULE_CLASSES`.
-4. Run `tests/test_ontology_sync.py` — it will fail loudly if the two drift apart.
+1. Add the new term to `src/hydrokg_ontology.ttl` (source of truth).
+2. Add the corresponding entry to `src/hydrokg_graph.py::RULE_METADATA`, or a new
+   constants block for a new stratification dimension.
+3. Add a new `Rule` subclass in `src/hydrokg_rules.py` and register it in
+   `src/hydrokg_rules.py::RULE_CLASSES`.
+4. Verify that `hydrokg_ontology.ttl` and `RULE_METADATA` remain consistent, since no
+   automated check currently enforces this correspondence.

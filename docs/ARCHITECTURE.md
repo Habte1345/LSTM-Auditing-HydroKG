@@ -1,108 +1,104 @@
 # Architecture
 
-## Why a knowledge graph, and why not a physics-informed loss
+## Design rationale
 
-Physics-informed losses for hydrologic deep learning already exist: adding a
-differentiable penalty term for water-balance closure or non-negativity to an LSTM's loss
-function is well-trodden ground, and backpropagating through routing/storage-consistency
-terms is expensive. That is explicitly *not* what this repository does anywhere.
+HydroKG represents detected rule violations as structured, queryable relational facts,
+linking each violation to its basin, rule, timestep, and hydroclimatic context, rather
+than as a differentiable penalty term added to the training loss. This design choice
+separates physical-consistency evaluation from the optimization objective: the model is
+trained throughout on the unmodified basin-normalized NSE loss, and violation information
+instead drives three mechanisms that operate outside the loss function entirely:
 
-HydroKG instead treats rule violations as **structured, queryable relational facts** —
-which basin, which rule, which timestep, which aridity/land-cover class, how it relates to
-other basins — and uses queries over that structure to drive three enhancement mechanisms
-that sit entirely outside the loss function:
+1. **Curriculum reweighting** (`hydrokg_enhancement.py::ViolationCurriculumSampler`) —
+   determines which training examples the model sees in the following epoch, based on a
+   graph query over each basin's accumulated violation count.
+2. **Graph-analogy correction** (`hydrokg_enhancement.py::GraphAnalogyCorrector`) —
+   modifies the model's output after the forward pass, based on a graph traversal to
+   structurally similar, low-violation basins.
+3. **Violation-history embedding** (`hydrokg_enhancement.py::build_embedding_matrix`) —
+   modifies the model's input by exposing each basin's own violation profile as an
+   auxiliary static feature.
 
-1. **Query-driven curriculum reweighting** (`hydrokg/enhancement/curriculum.py`) — changes
-   which training examples the model sees next, based on a graph query.
-2. **Graph-analogy correction** (`hydrokg/enhancement/graph_analogy_correction.py`) —
-   changes the model's output after the forward pass, based on a graph traversal to
-   similar, low-violation basins.
-3. **Violation-history embeddings** (`hydrokg/enhancement/violation_embeddings.py`) —
-   changes the model's input, by exposing each basin's own violation profile as an
-   auxiliary feature.
-
-None of these require gradients to flow through a hydrologic constraint. This is the
-architectural bet the whole repository is built around, per an explicit project decision:
-leverage the graph's relational/retrieval capability, not a PINN-style loss term.
+None of these mechanisms require gradients to flow through a hydrologic constraint.
 
 ## Two operating modes
 
 ### Offline (post-processing) audit
 
 ```
-completed LSTM predictions (submodule's evaluate() pickle output)
+Completed LSTM predictions
         │
         ▼
-hydrokg.audit.OfflineAuditor
-        │  for each basin: run R0-R6 (hydrokg.rules.*) against the full time series
+hydrokg_audit.OfflineAuditor
+        │   evaluates R0-R6 against the full time series for each basin
         ▼
 GraphStore.write_violations()  +  GraphStore.set_basin_metrics(kge, violation_burden)
         │
         ▼
-hydrokg.evaluation.skill_trust_analysis  →  is high KGE actually physically trustworthy?
-hydrokg.viz.skill_trust_plots            →  the figure that shows the skill-trust gap
+hydrokg_evaluation.summarize_skill_trust   — basin-level skill-trust relationship
+hydrokg_viz.plot_skill_trust_scatter       — corresponding figure
 ```
 
-### Real-time (online) audit
+### Real-time (online) detection during fine-tuning
+
+The real-time mechanism operates inside `EnhancedTrainingPipeline.fine_tune()`
+(`hydrokg_enhancement.py`), scoped to the rules that a single training batch can support:
 
 ```
-LSTM inference loop, one prediction at a time
+Training loop, one batch at a time
         │
         ▼
-hydrokg.audit.RealtimeAuditor.ingest(basin, t, q_sim, q_obs, p)
+Batch output rescaled to physical units (mm/day)
         │
-        ├── R0-R3 (daily): evaluated on this single row, immediately
-        ├── R4 (event/water-year): evaluated once the water year closes
-        └── R5, R6 (annual): evaluated once the water year closes
+        ├── R0-R3 (daily-scale, no calendar context required): evaluated immediately
+        │   against this batch's own output, detached from the loss and backward pass
+        │
+        └── R4-R6 (event- and annual-scale): not evaluated here; a full water-year of
+            calendar-dated observations is required, which an isolated training
+            sequence does not carry. These remain restricted to offline auditing,
+            before and after training.
         │
         ▼
-GraphStore accumulates violations continuously
+GraphStore accumulates R0-R3 violations continuously as they are detected
         │
         ▼
-hydrokg.enhancement.*  (curriculum / analogy correction / embeddings) consume the
-graph's current state for the next training pass or the next inference call
+Between epochs: curriculum weights and violation embeddings are recomputed from the
+graph's current state, reflecting the model's most recent training-time behavior
 ```
 
-The staging (daily immediately, event/annual only at window close) is a direct
-implementation of the manuscript's requirement that "real-time auditing is staged rather
-than simultaneous" — each rule activates exactly when its required temporal context
-becomes available, not before.
+Real-time evaluation in this framework refers specifically to R0-R3; R4-R6 are audited
+only offline. This scope follows from the temporal context each rule requires, not from
+an arbitrary implementation choice.
 
-## Graph backend: why two implementations exist
+## Graph backend
 
-`hydrokg.graph.base.GraphStore` is an abstract interface with two implementations:
+`hydrokg_graph.GraphStore` is an abstract interface with two implementations:
 
-- `hydrokg.graph.memory_store.InMemoryGraphStore` — plain pandas, no server, used for
-  every test in `tests/` and the `--demo` CLI paths. This is what was actually exercised
-  and validated while building this repository (no Docker/Neo4j binary was available in
-  that environment).
-- `hydrokg.graph.neo4j_store.Neo4jGraphStore` — the production backend, using the
-  official `neo4j` Python driver and real Cypher queries, intended for the full
-  670-basin, multi-decade CAMELS run and CIROH-scale operational use.
+- `InMemoryGraphStore` — pandas-based, requires no server. Default backend for all CLI
+  runs (`--graph_backend memory`).
+- `Neo4jGraphStore` — Cypher-query backend using the official `neo4j` Python driver,
+  intended for large-scale, multi-decade runs (`--graph_backend neo4j`; see
+  `docker-compose.yml`).
 
-Every rule, auditor, and enhancement mechanism is written against `GraphStore` only, never
-against a specific backend, so switching from `memory` to `neo4j` (`--graph_backend` on
-every CLI, or the `backend` argument to `hydrokg.graph.build_graph_store`) requires no
-changes to rule or enhancement logic. `tests/test_neo4j_store.py` mirrors
-`tests/test_graph_store_memory.py`'s exact assertions and is the acceptance test to run
-against a live Neo4j instance before trusting the production backend.
+Every rule, auditor, and enhancement mechanism is written against the `GraphStore`
+interface, not against a specific backend, so switching between `memory` and `neo4j`
+requires no change to rule or enhancement logic.
 
-## Why only violations are graph nodes, not every daily value
+## Graph granularity
 
-At 670 basins × ~30 years × 7 rules, materializing every daily (prediction, observation,
-rule-check) triple would be on the order of 10⁸-10⁹ facts, most of them "rule not
-violated" — of little value to any downstream consumer. `hydrokg/graph/schema.py`
-documents this explicitly: only violations (the exception) are written as graph facts.
-Curriculum reweighting, analogy correction, and violation embeddings all only need the
-violation record, not the full daily series (which remains in the pandas
-DataFrames/H5 files already produced by the submodule).
+At 670 basins, multi-decade daily records, and seven rules, materializing every
+(prediction, observation, rule-check) triple would produce on the order of 10⁸-10⁹ facts,
+the overwhelming majority representing non-violations. `hydrokg_graph.py` therefore writes
+only detected violations as graph facts. Curriculum reweighting, analogy correction, and
+violation embeddings each require only the violation record, not the full daily series,
+which remains available in the underlying data files produced by the baseline LSTM
+pipeline.
 
-## Where the submodule fits
+## Interface to the baseline LSTM
 
-`external/HydroAuditToolFrameowrk` is a git submodule, **not modified in any way**. Its
-hardcoded local paths (`camels_root`, `run_dir` in its committed `cfg.json` examples) and
-lack of packaging (`setup.py`) are worked around entirely from `hydrokg/adapters/lstm_adapter.py`,
-which is the single place that adds the submodule's root to `sys.path` and calls its
-functions with config-driven arguments. If the submodule is ever updated upstream (e.g. a
-new commit fixing its packaging), nothing in `hydrokg/` needs to change as long as the
-function signatures in `data/datautils.py` and `Scripts/utils.py` stay stable.
+`external/HydroAuditToolFrameowrk` is a git submodule containing the baseline LSTM
+implementation (Kratzert et al., 2019) and is not modified. `src/hydrokg_adapters.py` is
+the sole interface to this submodule: it adds the submodule root to `sys.path` and calls
+its functions with configuration-driven arguments, so that changes to the submodule do not
+require changes elsewhere in this codebase as long as its function signatures remain
+stable.
