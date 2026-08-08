@@ -1,94 +1,97 @@
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
-import geopandas as gpd
-from matplotlib.lines import Line2D
-import tempfile
-import requests
+"""
+Mixed-type findings figure: 2 spatial maps (skill and consistency improvement,
+geographically), 1 clean paired scatter (individual-basin movement, no confusing
+connector lines), 1 boxplot (distribution by aridity, not just means), 1 bar chart
+(per-rule mechanism story), 1 ranked-improvement line (how many basins actually
+improved). All from your real, paired baseline/enhanced re-audited data.
 
-from hydrokg.rules.registry import VIOLATION_CLASS_TO_RULES
-
-# =========================================================
-# GLOBAL STYLE
-# =========================================================
-plt.rcParams.update({
-    "font.family": "Times New Roman",
-    "axes.titlesize": 11,
-    "axes.titleweight": "bold",
-    "axes.labelsize": 10.5,
-    "xtick.labelsize": 9,
-    "ytick.labelsize": 9,
-    "legend.fontsize": 8.5,
-    "axes.linewidth": 0.9,
-    "savefig.dpi": 600,
-})
+Usage: edit the CSV paths if needed, then run this file.
+"""
 import sys
 from pathlib import Path
 
-repo_root = Path("/bighome/hdagne1/LSTM-Auditing-HydroKG")
-sys.path.insert(0, str(repo_root))            # lets "from src.hydrokg_rules import ..." work
-sys.path.insert(0, str(repo_root / "src"))    # lets hydrokg_rules.py's OWN internal
-                                               # "from hydrokg_graph import ..." resolve
+try:
+    repo_root = Path(__file__).resolve().parent
+except NameError:
+    repo_root = Path("/bighome/hdagne1/LSTM-Auditing-HydroKG")
 
-script_path = r"/bighome/hdagne1/LSTM-Auditing-HydroKG/figures/Figure_1_plot.py"
-with open(script_path, encoding="utf-8") as file:
-    exec(file.read(), globals())
+sys.path.insert(0, str(repo_root))
+sys.path.insert(0, str(repo_root / "src"))
 
-# =========================================================
-# INPUTS YOU ALREADY HAVE
-# =========================================================
-# `results` = the DataFrame from auditor.audit_all(...) / your run_offline_audit output
-# (columns: basin_id, kge, violation_burden, dominant_class, violation_counts, ...)
-#
-# `enhanced_results` = the SAME kind of DataFrame, but from auditing the HydroKG-enhanced
-# LSTM's predictions. Set to None until you've actually run the enhancement pipeline
-# (hydrokg.enhancement.enhanced_training.EnhancedTrainingPipeline) and re-audited its output.
-enhanced_results = None  # <-- replace once you have it; do not fabricate this
+import ast
+import tempfile
 
-# =========================================================
-# LOAD CAMELS BASIN ATTRIBUTES + GEOMETRY (real, unchanged from your script)
-# =========================================================
-url = (
-    "https://www.hydroshare.org/resource/658c359b8c83494aac0f58145b1b04e6/"
-    "data/contents/camels_attributes_v2.0.feather"
-)
+import numpy as np
+import pandas as pd
+import requests
+import geopandas as gpd
+import matplotlib.pyplot as plt
+import matplotlib as mpl
+from matplotlib.gridspec import GridSpec
+from matplotlib.lines import Line2D
+from matplotlib.patches import Patch
+import matplotlib.ticker
+
+mpl.rcParams['font.family'] = 'serif'
+mpl.rcParams['font.serif'] = ['Times New Roman', 'Liberation Serif', 'DejaVu Serif']
+mpl.rcParams['figure.dpi'] = 150
+
+# ============================================================
+# 1. LOAD AND PAIR YOUR REAL BASELINE + ENHANCED RESULTS
+# ============================================================
+BASELINE_CSV = repo_root / "results" / "hydrokg_run2_REAUDITED_baseline_results.csv"
+ENHANCED_CSV = repo_root / "results" / "hydrokg_run2_REAUDITED_enhanced_results.csv"
+
+rule_cols = ["R0", "R1", "R2", "R3", "R4", "R5", "R6"]
+
+
+def load_stage(csv_path):
+    raw = pd.read_csv(csv_path, dtype={"basin_id": str})
+    raw["basin_id"] = raw["basin_id"].str.zfill(8)
+    raw["violation_counts"] = raw["violation_counts"].apply(ast.literal_eval)
+    raw["n_evaluable"] = raw["n_evaluable"].apply(ast.literal_eval)
+    rule_rates = raw.apply(
+        lambda row: pd.Series({r: row["violation_counts"].get(r, 0) / row["n_evaluable"].get(r, 1)
+                                if row["n_evaluable"].get(r, 0) > 0 else np.nan for r in rule_cols}),
+        axis=1,
+    )
+    out = pd.concat([raw[["basin_id", "kge", "violation_burden", "aridity_class", "landcover_class"]],
+                      rule_rates], axis=1)
+    return out.set_index("basin_id")
+
+
+baseline = load_stage(BASELINE_CSV)
+enhanced = load_stage(ENHANCED_CSV)
+common = baseline.index.intersection(enhanced.index)
+print(f"Paired basins: {len(common)}")
+baseline, enhanced = baseline.loc[common], enhanced.loc[common]
+
+delta_kge = enhanced["kge"] - baseline["kge"]
+delta_burden = baseline["violation_burden"] - enhanced["violation_burden"]
+aridity_class = baseline["aridity_class"]
+aridity_order = [c for c in ["humid", "sub_humid", "semi_arid", "arid"] if c in aridity_class.unique()]
+
+
+jet = mpl.colormaps["jet"]
+
+model_colors = {"Base": 'magenta', "HydroKG": 'darkgreen'}
+aridity_display = {"humid": "Humid", "sub_humid": "Sub-humid", "semi_arid": "Semi-arid", "arid": "Arid"}
+aridity_jet_frac = {"humid": 0.18, "sub_humid": 0.38, "semi_arid": 0.62, "arid": 0.85}
+aridity_colors = {c: jet(aridity_jet_frac[c]) for c in aridity_order}
+
+# ============================================================
+# 2. REAL BASIN GEOMETRY
+# ============================================================
+camels_url = ("https://www.hydroshare.org/resource/658c359b8c83494aac0f58145b1b04e6/"
+              "data/contents/camels_attributes_v2.0.feather")
 tmp = tempfile.NamedTemporaryFile(suffix=".feather", delete=False)
-tmp.write(requests.get(url).content)
-basins = gpd.read_feather(tmp.name).reset_index(drop=False)
-if basins.crs is None:
-    basins = basins.set_crs("EPSG:4326")
+tmp.write(requests.get(camels_url).content)
+basins_geo = gpd.read_feather(tmp.name).reset_index(drop=False)
+if basins_geo.crs is None:
+    basins_geo = basins_geo.set_crs("EPSG:4326")
+basins_geo["gauge_id"] = basins_geo["gauge_id"].astype(str).str.zfill(8)
+basins_geo = basins_geo.set_index("gauge_id")
 
-states_all = gpd.read_file(
-    r"F:\Data\Mopex_Boundaries\CONUS_shape\States_shapefile.shp"
-).to_crs(5070)
-states_5070 = states_all[~states_all["State_Name"].isin(["ALASKA", "HAWAII"])].to_crs(5070)
-
-basins_5070 = basins.to_crs(5070).copy()
-basins_5070["geometry_points"] = basins_5070.geometry.centroid
-basins_5070 = basins_5070.set_geometry("geometry_points")
-
-# =========================================================
-# MERGE YOUR REAL AUDIT RESULTS ONTO CAMELS ATTRIBUTES
-# =========================================================
-results = results.copy()
-results["gauge_id"] = results["basin_id"].astype(str).str.zfill(8)
-basins_5070["gauge_id"] = basins_5070["gauge_id"].astype(str).str.zfill(8)
-
-merged = basins_5070.merge(results, on="gauge_id", how="inner")
-print(f"Matched {len(merged)} of {len(results)} audited basins to CAMELS attributes")
-
-# Aridity classification: AI = P/PET = 1/aridity (CAMELS 'aridity' is PET/P)
-merged["AI"] = 1 / merged["aridity"]
-bins = [0, 0.20, 0.50, 0.65, np.inf]
-aridity_order = ["Arid", "Semi-arid", "Dry sub-humid", "Humid"]
-merged["aridity_class"] = pd.cut(merged["AI"], bins=bins, labels=aridity_order, include_lowest=True)
-merged = merged.dropna(subset=["aridity_class"])
-aridity_display = {"Arid": "Arid", "Semi-arid": "Semi-arid",
-                    "Dry sub-humid": "Dry\nsub-humid", "Humid": "Humid"}
-
-aridity_colors_map = dict(zip(aridity_order, plt.cm.jet(np.linspace(0, 1, len(aridity_order)))))
-
-# Land cover mapping (real, from your script)
 land_cover_mapping = {
     "Croplands": "CL/NVM", "cropland/natural vegetation mosaic": "CL/NVM",
     "Deciduous Broadleaf Forest": "DBF", "Evergreen Needleleaf Forest": "EF",
@@ -96,134 +99,210 @@ land_cover_mapping = {
     "Grasslands": "GL", "Savannas": "WS + SL", "Woody Savannas": "WS + SL",
     "Closed Shrublands": "WS + SL", "Open Shrublands": "WS + SL",
 }
-merged["dom_land_cover_short"] = merged["dom_land_cover"].map(land_cover_mapping)
-merged = merged.dropna(subset=["dom_land_cover_short"])
 veg_order = ["CL/NVM", "DBF", "EF", "MF", "GL", "WS + SL"]
+landcover_grouped_full = basins_geo["dom_land_cover"].astype(str).str.strip().map(land_cover_mapping)
+landcover_grouped = landcover_grouped_full.reindex(common)
+landcover_order = veg_order
+print("Land-cover basins matched to the 6 mapped classes:", landcover_grouped.notna().sum(), "of", len(common))
 
-model_colors = {"Traditional LSTM": "#377eb8", "HydroKG-enhanced LSTM": "#ff7f00"}
+states_url = ("https://raw.githubusercontent.com/PublicaMundi/MappingAPI/"
+              "master/data/geojson/us-states.json")
+states_tmp = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
+states_tmp.write(requests.get(states_url).content)
+states = gpd.read_file(states_tmp.name).to_crs(5070)
+states = states[~states["name"].isin(["Alaska", "Hawaii", "Puerto Rico"])]
 
-# =========================================================
-# REAL VIOLATION-CLASS BREAKDOWN PER BASIN (from violation_counts)
-# =========================================================
-class_display_names = {
-    "PhysicalImpossibility": "Physical impossibility",
-    "MagnitudeFailure": "Magnitude failure",
-    "TimingFailure": "Timing failure",
-    "BudgetScaleFailure": "Budget failure",
-}
-rule_colors = {
-    "Physical impossibility": aridity_colors_map["Arid"],
-    "Magnitude failure": aridity_colors_map["Semi-arid"],
-    "Timing failure": aridity_colors_map["Dry sub-humid"],
-    "Budget failure": aridity_colors_map["Humid"],
-}
+merged_geo = basins_geo.loc[basins_geo.index.intersection(common)].to_crs(5070)
+merged_geo["geometry"] = merged_geo.geometry.centroid
+merged_geo["delta_kge"] = delta_kge.reindex(merged_geo.index)
+merged_geo["delta_burden"] = delta_burden.reindex(merged_geo.index)
+print(f"Basins with real geometry matched: {len(merged_geo)}")
 
-def class_totals(violation_counts: dict) -> pd.Series:
-    return pd.Series({
-        class_display_names[cls]: sum(violation_counts.get(r, 0) for r in rule_ids)
-        for cls, rule_ids in VIOLATION_CLASS_TO_RULES.items()
-    })
+# ============================================================
+# 3. FIGURE
+# ============================================================
+fig = plt.figure(figsize=(14, 8), dpi=200)
+gs = GridSpec(3, 3, figure=fig, hspace=0.55, wspace=0.35)
 
-class_df = merged["violation_counts"].apply(class_totals)
-merged = pd.concat([merged.reset_index(drop=True), class_df.reset_index(drop=True)], axis=1)
+# --- (a) [gs[0,0]] skill-trust scatter, combined -- NOW with the three
+# violation-severity reference bands (High/Medium/Low), restored from the
+# original bubble-template figure. Both scatter series (Traditional, Enhanced)
+# are kept exactly as before; only the reference bands + labels are added. ---
+ax = fig.add_subplot(gs[0, 0])
+ax.scatter(baseline["kge"], baseline["violation_burden"], s=16, color=model_colors["Base"],
+           alpha=0.55, edgecolors="none", label="Base", zorder=2)
+ax.scatter(enhanced["kge"], enhanced["violation_burden"], s=16, color=model_colors["HydroKG"],
+           alpha=0.55, edgecolors="none", label="HydroKG", zorder=3)
+ax.set_yscale("log")
+ax.set_xlim(-0.05, 1.02)
+ax.set_ylim(8e-4, 1.3)
+major_ticks = [0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0]
+ax.set_yticks(major_ticks)
+ax.set_yticklabels([f"{t:g}" for t in major_ticks])
+ax.yaxis.set_minor_locator(mpl.ticker.LogLocator(base=10, subs=np.arange(2, 10) * 0.1))
+ax.yaxis.set_minor_formatter(mpl.ticker.NullFormatter())
+for yy in [1e-1, 1e-2]:
+    ax.axhline(yy, color="0.7", lw=1.0, ls=(0, (4, 3)), zorder=1)
+ax.text(0.0, 8.4e-1, "High violation", color="black", fontsize=8, style="italic", va="center")
+ax.text(0.0, 2.8e-2, "Medium violation", color="black", fontsize=8, style="italic", va="center")
+ax.text(0.0, 2.5e-3, "Low violation", color="black", fontsize=8, style="italic", va="center")
+ax.set_xlabel("KGE")
+ax.set_ylabel("Violation burden $V_b$")
+ax.set_title("(a)", loc="left", fontsize=10.5)
+ax.legend(frameon=False, fontsize=10, loc="lower right", ncols=1)
+ax.spines[["top", "right"]].set_visible(False)
 
-rule_comp = (
-    merged.groupby("aridity_class", observed=True)[list(class_display_names.values())]
-    .sum()
-)
-rule_comp = rule_comp.div(rule_comp.sum(axis=1), axis=0).T[aridity_order]  # fractions, rules x aridity
-
-# =========================================================
-# HELPER: single-series boxplot (one model only -- that's all we have so far)
-# =========================================================
-def single_boxplot(ax, data_by_category, categories, display_labels, ylabel, title, colors):
-    data = [data_by_category[c].dropna().values for c in categories]
-    bp = ax.boxplot(data, patch_artist=True, widths=0.5, showfliers=False,
-                     medianprops=dict(color="black", linewidth=1.1),
-                     whiskerprops=dict(color="black", linewidth=0.9),
-                     capprops=dict(color="black", linewidth=0.9))
-    for box, cat in zip(bp["boxes"], categories):
-        box.set(facecolor=colors[cat], edgecolor="black", linewidth=0.9, alpha=0.85)
-    ax.set_xticks(np.arange(1, len(categories) + 1))
-    ax.set_xticklabels(display_labels)
-    ax.set_ylabel(ylabel)
-    ax.set_title(title, loc="left", pad=6)
-    ax.grid(axis="y", linestyle="--", alpha=0.22, linewidth=0.7)
-    ax.set_axisbelow(True)
-
-# =========================================================
-# FIGURE
-# =========================================================
-fig, axes = plt.subplots(2, 3, figsize=(14.2, 8.2),
-                          gridspec_kw={"wspace": 0.25, "hspace": 0.34}, dpi=200)
-
-# --- (a) CAMELS basins by aridity class, restricted to your audited/matched basins ---
-ax = axes[0, 0]
-for cls in aridity_order:
-    sub = merged[merged["aridity_class"] == cls]
-    ax.scatter(sub.geometry.x, sub.geometry.y, s=22, color=aridity_colors_map[cls],
-               edgecolor="black", linewidth=0.20, alpha=0.85, label=cls, zorder=2)
-states_5070.boundary.plot(ax=ax, edgecolor="black", linewidth=0.35, zorder=3)
-ax.set_title(f"(a) Audited CAMELS basins by aridity class (n={len(merged)})", loc="left", pad=6)
+# --- (b) [gs[0,1]] geographic consistency change -- colorbar now in its OWN
+# dedicated axes (via make_axes_locatable), so it no longer shrinks this map's
+# own axes relative to every other panel in the grid. This is the actual fix. ---
+ax = fig.add_subplot(gs[0, 1])
+states.boundary.plot(ax=ax, edgecolor="0.4", linewidth=0.5, zorder=1)
+sc = ax.scatter(merged_geo.geometry.x, merged_geo.geometry.y, c=merged_geo["delta_burden"],
+                 cmap="jet", vmin=-0.1, vmax=0.1, s=20, edgecolor="k", linewidth=0, zorder=2)
+ax.set_aspect("auto")  # override geopandas' default equal-aspect box-shrinking
+ax.set_title("(b)", loc="left", fontsize=12)
 ax.set_axis_off()
-handles = [Line2D([0], [0], marker="o", linestyle="None", markerfacecolor=aridity_colors_map[c],
-                  markeredgecolor="black", markeredgewidth=0.4, markersize=6, label=c)
-           for c in aridity_order]
-ax.legend(handles=handles, loc="lower left", bbox_to_anchor=(0.0, -0.10),
-          frameon=False, ncol=4, fontsize=8, handletextpad=0.6, columnspacing=0.8)
+# Colorbar placed in the natural gap BELOW this map's own rectangle (using the row's
+# hspace), not carved out of the map's own axes -- this is what keeps every panel's
+# rectangle exactly the same size. ax.get_position() reflects GridSpec's own layout
+# math and is reliable without needing a draw() call first.
+pos_b = ax.get_position()
+cax_b = fig.add_axes([pos_b.x0 + pos_b.width * 0.15, pos_b.y0 - 0.022, pos_b.width * 0.7, 0.012])
+fig.colorbar(sc, cax=cax_b, orientation="horizontal", label=r"$\Delta V_b$", extend="max")
 
-# --- (b) Real violation burden by aridity class (traditional LSTM only) ---
-viol_by_aridity = {c: merged.loc[merged["aridity_class"] == c, "violation_burden"] for c in aridity_order}
-single_boxplot(axes[0, 1], viol_by_aridity, aridity_order,
-               [aridity_display[c] for c in aridity_order],
-               "Violation burden $V_b$", "(b) Violation burden by aridity class (traditional LSTM)",
-               aridity_colors_map)
+# --- (c) [gs[0,2]] geographic skill change -- same colorbar fix ---
+ax = fig.add_subplot(gs[0, 2])
+states.boundary.plot(ax=ax, edgecolor="0.4", linewidth=0.5, zorder=1)
+sc = ax.scatter(merged_geo.geometry.x, merged_geo.geometry.y, c=merged_geo["delta_kge"],
+                 cmap="jet", vmin=-0.3, vmax=0.3, s=20, edgecolor="k", linewidth=0, zorder=2)
+ax.set_aspect("auto")  # override geopandas' default equal-aspect box-shrinking
+ax.set_title("(c)", loc="left", fontsize=12)
+ax.set_axis_off()
+pos_a = ax.get_position()
+cax_a = fig.add_axes([pos_a.x0 + pos_a.width * 0.15, pos_a.y0 - 0.022, pos_a.width * 0.7, 0.012])
+fig.colorbar(sc, cax=cax_a, orientation="horizontal", label=r"$\Delta$KGE", extend="max")
 
-# --- (c) Real violation burden by land-cover class (traditional LSTM only) ---
-veg_colors = dict(zip(veg_order, plt.cm.tab10(np.linspace(0, 1, len(veg_order)))))
-viol_by_veg = {c: merged.loc[merged["dom_land_cover_short"] == c, "violation_burden"] for c in veg_order}
-single_boxplot(axes[0, 2], viol_by_veg, veg_order, veg_order,
-               "Violation burden $V_b$", "(c) Violation burden by land-cover class (traditional LSTM)",
-               veg_colors)
+# --- (d) ---
+ax = fig.add_subplot(gs[1, 0])
+for c in aridity_order:
+    mask = aridity_class == c
+    ax.scatter(baseline.loc[mask, "kge"], enhanced.loc[mask, "kge"], s=13,
+               color=aridity_colors[c], alpha=0.65, edgecolors="none", label=aridity_display[c])
+lims = [min(0, 0), max(1, 1)]
+ax.plot(lims, lims, color="black", linewidth=1, linestyle="--", zorder=1)
+ax.set_xlabel("Base LSTM KGE")
+ax.set_ylabel("HydroKG LSTM KGE")
+ax.set_xlim(0, 0.98)
+ax.set_ylim(0, 0.98)
+ax.set_title("(d)", loc="left", fontsize=10.5)
+ax.legend(frameon=False, fontsize=10, loc="upper left")
+ax.spines[["top", "right"]].set_visible(False)
 
-# --- (d) Real dominant-rule composition by aridity class ---
-ax = axes[1, 0]
-bottom = np.zeros(len(aridity_order))
-for rule in rule_comp.index:
-    vals = rule_comp.loc[rule, aridity_order].values
-    ax.bar([aridity_display[c] for c in aridity_order], vals, bottom=bottom,
-           color=rule_colors[rule], edgecolor="white", linewidth=0.7, label=rule)
-    bottom += vals
-ax.set_ylim(0, 1.0)
-ax.set_ylabel("Fraction of total violations")
-ax.set_title("(d) Dominant rule composition by aridity class", loc="left", pad=6)
-ax.grid(axis="y", linestyle="--", alpha=0.22, linewidth=0.7)
-ax.set_axisbelow(True)
-ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.18), ncol=2, frameon=True,
-          framealpha=0.95, edgecolor="0.7", fontsize=8)
+# --- (e) ---
+ax = fig.add_subplot(gs[1, 1])
+for c in aridity_order:
+    mask = aridity_class == c
+    ax.scatter(baseline.loc[mask, "violation_burden"], enhanced.loc[mask, "violation_burden"],
+               s=13, color=aridity_colors[c], alpha=0.65, edgecolors="none", label=aridity_display[c])
+lims_b = [0, max(baseline["violation_burden"].max(), enhanced["violation_burden"].max())]
+ax.plot(lims_b, lims_b, color="black", linewidth=1, linestyle="--", zorder=1)
+ax.set_xlabel("Base LSTM $V_b$")
+ax.set_ylabel("HydroKG LSTM $V_b$")
+ax.set_title("(e)", loc="left", fontsize=12)
+ax.set_xlim(0, 0.5)
+ax.set_ylim(0, 0.5)
+ax.legend(frameon=False, fontsize=10, loc="upper left")
+ax.spines[["top", "right"]].set_visible(False)
 
-# --- (e)/(f): require enhanced_results (traditional LSTM alone can't populate these) ---
-for ax, letter, title in [
-    (axes[1, 1], "e", "Skill improvement by aridity class"),
-    (axes[1, 2], "f", "Skill-trust improvement space"),
-]:
-    ax.set_title(f"({letter}) {title}", loc="left", pad=6)
-    if enhanced_results is None:
-        ax.text(0.5, 0.5, "Pending: run HydroKG-enhanced LSTM\nand re-audit to populate",
-                transform=ax.transAxes, ha="center", va="center", fontsize=9, color="0.35",
-                fontstyle="italic")
-        ax.set_xticks([]); ax.set_yticks([])
-        for spine in ax.spines.values():
-            spine.set_visible(False)
-    else:
-        # merge enhanced_results in the same way as `merged` above, compute delta_kge and
-        # delta_violation_burden per basin (hydrokg.evaluation.enhancement_metrics.compute_deltas),
-        # then reproduce your original (e)/(f) plotting logic against those real deltas.
-        pass
+# --- (f) ---
+ax = fig.add_subplot(gs[1, 2])
+positions_base = np.arange(len(aridity_order)) - 0.2
+positions_enh = np.arange(len(aridity_order)) + 0.2
+data_base = [baseline.loc[aridity_class == c, "violation_burden"].dropna() for c in aridity_order]
+data_enh = [enhanced.loc[aridity_class == c, "violation_burden"].dropna() for c in aridity_order]
+bp1 = ax.boxplot(data_base, positions=positions_base, widths=0.32, patch_artist=True, showfliers=False)
+bp2 = ax.boxplot(data_enh, positions=positions_enh, widths=0.32, patch_artist=True, showfliers=False)
+for box in bp1["boxes"]:
+    box.set(facecolor=model_colors["Base"], alpha=0.6)
+for box in bp2["boxes"]:
+    box.set(facecolor=model_colors["HydroKG"], alpha=0.6)
+ax.set_xticks(np.arange(len(aridity_order)))
+ax.set_xticklabels([aridity_display[c] for c in aridity_order], rotation=20, ha="right")
+ax.set_ylabel("Violation burden $V_b$")
+ax.set_title("(f)", loc="left", fontsize=12)
+ax.legend([bp1["boxes"][0], bp2["boxes"][0]], ["Base", "HydroKG"], frameon=False, fontsize=10)
+ax.spines[["top", "right"]].set_visible(False)
 
-for ax in axes.flat:
-    for spine in ax.spines.values():
-        spine.set_linewidth(0.9)
+# --- (g) ---
+ax = fig.add_subplot(gs[2, 0])
+positions_base = np.arange(len(landcover_order)) - 0.2
+positions_enh = np.arange(len(landcover_order)) + 0.2
+data_base_lc = [baseline.loc[landcover_grouped == c, "violation_burden"].dropna() for c in landcover_order]
+data_enh_lc = [enhanced.loc[landcover_grouped == c, "violation_burden"].dropna() for c in landcover_order]
+bp3 = ax.boxplot(data_base_lc, positions=positions_base, widths=0.32, patch_artist=True, showfliers=False)
+bp4 = ax.boxplot(data_enh_lc, positions=positions_enh, widths=0.32, patch_artist=True, showfliers=False)
+for box in bp3["boxes"]:
+    box.set(facecolor=model_colors["Base"], alpha=0.6)
+for box in bp4["boxes"]:
+    box.set(facecolor=model_colors["HydroKG"], alpha=0.6)
+ax.set_xticks(np.arange(len(landcover_order)))
+ax.set_xticklabels(landcover_order, rotation=20, ha="right", fontsize=9)
+ax.set_ylabel("Violation burden $V_b$")
+ax.set_title("(g)", loc="left", fontsize=12)
+ax.legend([bp3["boxes"][0], bp4["boxes"][0]], ["Base", "HydroKG"], frameon=False, fontsize=10)
+ax.spines[["top", "right"]].set_visible(False)
 
-plt.tight_layout(rect=[0, 0.035, 1, 0.955])
+# --- (h) ---
+ax = fig.add_subplot(gs[2, 1])
+x = np.arange(len(rule_cols))
+width = 0.35
+base_means = [baseline[r].mean() for r in rule_cols]
+enh_means = [enhanced[r].mean() for r in rule_cols]
+ax.bar(x - width / 2, base_means, width, color=model_colors["Base"], edgecolor="black", label="Base")
+ax.bar(x + width / 2, enh_means, width, color=model_colors["HydroKG"], edgecolor="black", label="HydroKG")
+for i, (b, e) in enumerate(zip(base_means, enh_means)):
+    pct = (e - b) / b * 100 if b > 0 else float("nan")
+    ax.text(i + width / 2, e + max(b, e) * 0.05 + 0.005, f"{pct:+.0f}%", ha="center", fontsize=8,rotation=90,
+             color="darkgreen" if pct < 0 else "darkred")
+ax.set_xticks(x)
+ax.set_xticklabels(rule_cols)
+ax.set_ylabel("Mean violation rate")
+ax.set_title("(h)", loc="left", fontsize=12)
+ax.legend(frameon=False, fontsize=10)
+ax.spines[["top", "right"]].set_visible(False)
+
+# --- (i) ---
+ax = fig.add_subplot(gs[2, 2])
+sorted_delta = delta_kge.sort_values().values
+n_basins_total = len(sorted_delta)
+crossover_idx = int(np.searchsorted(sorted_delta, 0))
+
+ax.plot(np.arange(n_basins_total), sorted_delta, color="black", linewidth=1.3, zorder=3)
+ax.axhline(0, color="0.3", linewidth=0.8, zorder=1)
+ax.axvline(crossover_idx, color="0.3", linewidth=0.8, linestyle=":", zorder=1)
+ax.fill_between(np.arange(n_basins_total), sorted_delta, 0, where=(sorted_delta >= 0),
+                 color=model_colors["HydroKG"], alpha=0.5, zorder=2)
+ax.fill_between(np.arange(n_basins_total), sorted_delta, 0, where=(sorted_delta >= 0),
+                 color=model_colors["HydroKG"], alpha=0.5, zorder=2)
+ax.fill_between(np.arange(n_basins_total), sorted_delta, 0, where=(sorted_delta < 0),
+                 color=model_colors["Base"], alpha=0.5, zorder=2)
+
+pct_improved = 100 * (delta_kge > 0).mean()
+pct_worsened = 100 * (delta_kge < 0).mean()
+legend_handles = [
+    Patch(facecolor=model_colors["HydroKG"], alpha=0.6,
+                       label=f"(\u0394KGE > 0): {pct_improved:.0f}%"),
+    Patch(facecolor=model_colors["Base"], alpha=0.6,
+                       label=f"(\u0394KGE < 0): {pct_worsened:.0f}% "),
+]
+ax.legend(handles=legend_handles, frameon=False, fontsize=10, loc="upper right")
+# ax.text(crossover_idx, ax.get_ylim()[0] * 0.92, f"  {n_basins_total - crossover_idx} of {n_basins_total}\n  basins improved",
+#         fontsize=7.5, color="0.3", va="bottom")
+
+ax.set_xlabel("Basins (sorted low to high)")
+ax.set_ylabel(r"$\Delta$KGE")
+ax.set_title("(i)", loc="left", fontsize=12)
+ax.spines[["top", "right"]].set_visible(False)
+save_path = repo_root / "figures" / "Figure_2.png"
+fig.savefig(save_path, dpi=600, bbox_inches="tight")
 plt.show()

@@ -1,0 +1,7 @@
+# Additional dependencies needed for hydrokg_enhancement.py's real fine-tuning /
+# generate_predictions (talks to the submodule's PyTorch model/dataset classes).
+-r requirements.txt
+torch>=2.1
+numba>=0.58
+h5py>=3.9
+scikit-learn>=1.3
